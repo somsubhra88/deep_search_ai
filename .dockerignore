@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+node_modules
+.next
+frontend/.next
+.env
+.env.local
+.env*.local
+.DS_Store
+*.md
+Makefile
+.cursor
+.vscode
