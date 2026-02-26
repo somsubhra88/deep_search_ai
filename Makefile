@@ -1,4 +1,4 @@
-.PHONY: setup start stop restart logs clean dev-backend dev-frontend help
+.PHONY: setup start stop restart logs clean dev-backend dev-frontend dist help
 
 # Default target
 help: ## Show this help
@@ -61,6 +61,9 @@ status: ## Show running containers and health
 clean: ## Remove containers, images, and volumes
 	docker compose down --rmi local --volumes --remove-orphans
 	@echo "✅ Cleaned up Docker resources"
+
+dist: ## Build clean distributable package under ./dist
+	./build_dist.sh
 
 dev-backend: ## Run backend locally (no Docker)
 	cd backend && uv run --project .. uvicorn app.main:app --reload --port 8000

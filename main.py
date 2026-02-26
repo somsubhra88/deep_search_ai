@@ -245,18 +245,20 @@ graph.add_edge("classify", END)
 
 app = graph.compile()
 
-state = SearchState(
-    query="Personalized Page Rank",
-    start_date=date(2024, 7, 1),
-    end_date=date(2024, 7, 31),
-    content_types=["text"],
-    deep_search=True,
-    max_results_per_type=5,
-)
 
-result = app.invoke(state)
+if __name__ == "__main__":
+    state = SearchState(
+        query="Personalized Page Rank",
+        start_date=date(2024, 7, 1),
+        end_date=date(2024, 7, 31),
+        content_types=["text"],
+        deep_search=True,
+        max_results_per_type=5,
+    )
 
-# LangGraph returns a plain dict state by default
-classified_results = result.get("classified_results", [])
-for r in classified_results:
-    print(r.get("classification"), r.get("type"), r.get("title"))
+    result = app.invoke(state)
+
+    # LangGraph returns a plain dict state by default
+    classified_results = result.get("classified_results", [])
+    for r in classified_results:
+        print(r.get("classification"), r.get("type"), r.get("title"))

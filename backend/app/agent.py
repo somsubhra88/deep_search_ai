@@ -20,13 +20,14 @@ import hashlib
 import ipaddress
 import socket
 from typing import AsyncGenerator
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from collections import OrderedDict
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 import httpx
 from bs4 import BeautifulSoup
+from app.memory_graph import store_search_memory
 
 import pathlib
 _base = pathlib.Path(__file__).resolve().parents[2]
@@ -40,6 +41,7 @@ else:
 logger = logging.getLogger(__name__)
 
 _ssl_verify = os.getenv("SSL_VERIFY", "true").lower() not in ("0", "false", "no")
+_debug_traceback = os.getenv("DEBUG_TRACEBACK", "false").lower() in ("1", "true", "yes")
 
 if not _ssl_verify:
     import urllib3
@@ -47,7 +49,6 @@ if not _ssl_verify:
     logger.warning("SSL verification disabled - use only on trusted networks")
 
 _http_client = httpx.Client(verify=_ssl_verify, timeout=30.0)
-_http_async_client = httpx.AsyncClient(verify=_ssl_verify, timeout=30.0)
 
 # ---------------------------------------------------------------------------
 # Multi-Model Support
@@ -972,27 +973,49 @@ async def _scrape_url(url: str, retries: int = 2) -> str:
         logger.warning("Blocked unsafe URL: %s", url[:100])
         return "[URL blocked by security policy]"
 
+    async def _fetch_html_with_safe_redirects(initial_url: str) -> str:
+        current_url = initial_url
+        max_redirects = 3
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; DeepSearchAgent/1.0; +https://github.com/search-agent)",
+        }
+
+        async with httpx.AsyncClient(
+            timeout=10.0, follow_redirects=False, verify=_ssl_verify
+        ) as client:
+            for _ in range(max_redirects + 1):
+                if not _is_safe_url(current_url):
+                    raise RuntimeError("Redirected to a blocked URL")
+
+                resp = await client.get(current_url, headers=headers)
+
+                if resp.status_code in {301, 302, 303, 307, 308}:
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise RuntimeError("Redirect location missing")
+                    current_url = urljoin(current_url, location)
+                    continue
+
+                resp.raise_for_status()
+                return resp.text
+
+        raise RuntimeError("Too many redirects while scraping")
+
     last_err = None
     for attempt in range(retries):
         try:
-            async with httpx.AsyncClient(
-                timeout=10.0, follow_redirects=True, verify=_ssl_verify
-            ) as client:
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (compatible; DeepSearchAgent/1.0; +https://github.com/search-agent)",
-                }
-                resp = await client.get(url, headers=headers)
-                resp.raise_for_status()
-                soup = BeautifulSoup(resp.text, "html.parser")
-                for tag in soup(["script", "style", "nav", "header", "footer"]):
-                    tag.decompose()
-                text = soup.get_text(separator="\n", strip=True)
-                text = re.sub(r"\n{3,}", "\n\n", text)
-                return text[:MAX_SCRAPE_CONTENT] if len(text) > MAX_SCRAPE_CONTENT else text
+            html = await _fetch_html_with_safe_redirects(url)
+            soup = BeautifulSoup(html, "html.parser")
+            for tag in soup(["script", "style", "nav", "header", "footer"]):
+                tag.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            return text[:MAX_SCRAPE_CONTENT] if len(text) > MAX_SCRAPE_CONTENT else text
         except Exception as e:
             last_err = e
             if attempt < retries - 1:
                 await asyncio.sleep(1)
+    logger.warning("Failed to scrape URL after retries (%s): %s", url[:120], last_err)
     return "[Content unavailable]"
 
 
@@ -1067,6 +1090,7 @@ async def run_research_agent(
     mode: str = "standard",
     modes: list[str] | None = None,
     model_id: str = "openai",
+    recalled_memories: list[dict] | None = None,
 ) -> AsyncGenerator[dict, None]:
     step_ctx = "unknown"
     budget = TokenBudget()
@@ -1086,6 +1110,14 @@ async def run_research_agent(
         query = _sanitize_query(query)
         if not query:
             raise ValueError("Query is empty after sanitization")
+
+        # Step 0: Surface recalled memories (if any)
+        if recalled_memories:
+            yield await _emit_step(
+                "memory_recall",
+                f"Recalled {len(recalled_memories)} related past research session(s)",
+                {"recalled_memories": recalled_memories},
+            )
 
         # Step 1: Generate search queries
         step_ctx = "query_generation"
@@ -1201,8 +1233,17 @@ async def run_research_agent(
                 all_instructions.append(inst)
         mode_instructions = "\n".join(all_instructions)
 
-        synthesis_prompt = f"""You are a research analyst. Synthesize the following sources into a comprehensive, well-structured Markdown report.
+        memory_context = ""
+        if recalled_memories:
+            essences = [m["essence"] for m in recalled_memories[:3]]
+            memory_context = (
+                "\n\nNote: The user previously researched related topics. "
+                f"Past context: {'; '.join(essences)}. "
+                "Use this context to build upon prior knowledge and avoid redundancy.\n"
+            )
 
+        synthesis_prompt = f"""You are a research analyst. Synthesize the following sources into a comprehensive, well-structured Markdown report.
+{memory_context}
 User's topic: {query}
 
 Sources:
@@ -1271,15 +1312,31 @@ Instructions:{mode_instructions}{safe_instruction}"""
             )
             metadata["confidence_matrix"] = confidence_matrix
 
-        # Attach token budget summary + model info
+        # Store research essence in semantic memory
+        step_ctx = "memory_storage"
+        essence_text = ""
+        try:
+            yield await _emit_step("storing_memory", "Distilling research essence into long-term memory...")
+            essence_text = await store_search_memory(
+                query, report_content, active_llm=active_llm,
+            )
+        except Exception as e:
+            logger.warning("Memory storage failed (non-fatal): %s", e)
+
+        # Attach token budget summary + model info + memory data
         metadata["token_usage"] = budget.summary
         metadata["model_used"] = model_label
         metadata["modes_used"] = active_modes
+        metadata["essence_text"] = essence_text
+        metadata["recalled_memories"] = recalled_memories or []
 
         yield await _emit_step("complete", "Report ready", {"report": report_content, "metadata": metadata})
 
     except Exception as e:
-        tb = traceback.format_exc()
         err_detail = f"[{step_ctx}] {type(e).__name__}: {str(e)}"
-        logger.error("Agent error at step %s: %s\n%s", step_ctx, e, tb)
-        raise RuntimeError(f"{err_detail}\n\nFull traceback:\n{tb}") from e
+        if _debug_traceback:
+            tb = traceback.format_exc()
+            logger.error("Agent error at step %s: %s\n%s", step_ctx, e, tb)
+            raise RuntimeError(f"{err_detail}\n\nFull traceback:\n{tb}") from e
+        logger.error("Agent error at step %s: %s", step_ctx, e)
+        raise RuntimeError(err_detail) from e

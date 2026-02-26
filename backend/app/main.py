@@ -6,6 +6,7 @@ Includes rate limiting, input validation, security headers, and error sanitizati
 
 import json
 import logging
+import os
 import time
 from collections import defaultdict
 
@@ -22,6 +23,7 @@ import pathlib
 load_dotenv(dotenv_path=pathlib.Path(__file__).resolve().parents[2] / ".env")
 
 from app.agent import run_research_agent
+from app.memory_graph import recall_past_context
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,15 +36,36 @@ logger = logging.getLogger(__name__)
 class RateLimiter:
     """Simple sliding-window rate limiter. Per-IP tracking."""
 
-    def __init__(self, max_requests: int = 10, window_seconds: int = 60):
+    def __init__(
+        self, max_requests: int = 10, window_seconds: int = 60, max_clients: int = 5000
+    ):
         self.max_requests = max_requests
         self.window = window_seconds
+        self.max_clients = max_clients
         self._requests: dict[str, list[float]] = defaultdict(list)
+
+    def _prune(self, now: float) -> None:
+        stale_clients = []
+        for client_ip, timestamps in self._requests.items():
+            active = [t for t in timestamps if now - t < self.window]
+            if active:
+                self._requests[client_ip] = active
+            else:
+                stale_clients.append(client_ip)
+
+        for client_ip in stale_clients:
+            self._requests.pop(client_ip, None)
 
     def is_allowed(self, client_ip: str) -> bool:
         now = time.time()
-        timestamps = self._requests[client_ip]
+        self._prune(now)
+        is_new_client = client_ip not in self._requests
+        if is_new_client and len(self._requests) >= self.max_clients:
+            return False
+
+        timestamps = self._requests.get(client_ip, [])
         self._requests[client_ip] = [t for t in timestamps if now - t < self.window]
+
         if len(self._requests[client_ip]) >= self.max_requests:
             return False
         self._requests[client_ip].append(now)
@@ -50,7 +73,8 @@ class RateLimiter:
 
     def remaining(self, client_ip: str) -> int:
         now = time.time()
-        active = [t for t in self._requests.get(client_ip, []) if now - t < self.window]
+        self._prune(now)
+        active = self._requests.get(client_ip, [])
         return max(0, self.max_requests - len(active))
 
 
@@ -70,6 +94,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
 
@@ -104,6 +130,12 @@ app.add_middleware(
 
 VALID_MODES = {"standard", "debate", "timeline", "academic", "fact_check", "deep_dive"}
 VALID_MODELS = {"openai", "qwen"}
+TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() in {"1", "true", "yes"}
+_TRUSTED_PROXY_IPS = {
+    ip.strip()
+    for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1,::1").split(",")
+    if ip.strip()
+}
 
 
 class ResearchRequest(BaseModel):
@@ -144,10 +176,13 @@ class ResearchRequest(BaseModel):
 
 
 def _get_client_ip(request: Request) -> str:
+    client_host = request.client.host if request.client else "unknown"
+
+    # Only trust forwarding headers from known reverse proxies.
     forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
+    if TRUST_PROXY_HEADERS and forwarded and client_host in _TRUSTED_PROXY_IPS:
         return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    return client_host
 
 
 def _sanitize_error(error: str) -> str:
@@ -192,6 +227,14 @@ async def research(request: Request, body: ResearchRequest):
 
     logger.info("Research request from %s [%s|%s]: %s", client_ip, model_id, "+".join(modes), query[:80])
 
+    recalled_memories: list[dict] = []
+    try:
+        recalled_memories = await recall_past_context(query)
+        if recalled_memories:
+            logger.info("Recalled %d past memories for: %s", len(recalled_memories), query[:50])
+    except Exception as e:
+        logger.warning("Memory recall failed (non-fatal): %s", e)
+
     async def event_generator():
         try:
             async for event in run_research_agent(
@@ -200,6 +243,7 @@ async def research(request: Request, body: ResearchRequest):
                 safe_search=safe_search,
                 modes=modes,
                 model_id=model_id,
+                recalled_memories=recalled_memories,
             ):
                 if await request.is_disconnected():
                     logger.info("Client disconnected, stopping research")

@@ -1,7 +1,5 @@
 # Deep Search AI Agent
 
-![Architecture Diagram](images/deep_search_ui.png)
-
 A modern AI-powered research application that performs deep web searches, scrapes content, and synthesizes structured reports with citations. Built with a multi-agent architecture featuring self-reflection, claim verification, and adaptive search depth.
 
 ## Features
@@ -90,6 +88,7 @@ make restart     # Rebuild and restart
 make logs        # Follow live logs
 make status      # Check container health
 make clean       # Remove containers and images
+make dist        # Build clean shareable package in ./dist
 ```
 
 ## Local Development (no Docker)
@@ -133,8 +132,28 @@ All settings are in `.env`. See `.env.example` for the full list with comments.
 | `SEARCH_PROVIDER` | No | `serpapi` | `serpapi` or `tavily` |
 | `TAVILY_API_KEY` | No | — | Tavily API key (if using Tavily) |
 | `SSL_VERIFY` | No | `true` | Set `false` for corporate proxies |
+| `DEBUG_TRACEBACK` | No | `false` | Include full backend tracebacks in API errors (dev only) |
+| `TRUST_PROXY_HEADERS` | No | `false` | Trust `X-Forwarded-For` only when behind known proxy |
+| `TRUSTED_PROXY_IPS` | No | `127.0.0.1,::1` | Comma-separated proxy IP allowlist |
 | `BACKEND_PORT` | No | `8000` | Backend port (Docker) |
 | `FRONTEND_PORT` | No | `3000` | Frontend port (Docker) |
+
+## Distribution
+
+Build a clean distributable package (without local secrets, local memory data, or build artifacts):
+
+```bash
+make dist
+```
+
+Outputs:
+- `dist/deep-search-agent/` (clean project copy)
+- `dist/deep-search-agent.tar.gz` (archive to share)
+
+Before sharing, verify:
+- `.env` is not included
+- no API keys are present in packaged files
+- `chroma_data/memory_store.json` is not included
 
 ## API
 
@@ -188,6 +207,7 @@ deep-search-agent/
 - Input validation and query sanitization
 - Security headers (CSP, X-Frame-Options, etc.)
 - Error messages sanitized (no API keys or paths leaked)
+- Proxy headers are only trusted when explicitly enabled and allowlisted
 - Non-root Docker containers
 - Secrets excluded from Docker images via `.dockerignore`
 
