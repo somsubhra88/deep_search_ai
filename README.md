@@ -1,5 +1,5 @@
 # Deep Search AI Agent
-
+![User Interface](images/deep_search_ai.png)
 A modern AI-powered research application that performs deep web searches, scrapes content, and synthesizes structured reports with citations. Built with a multi-agent architecture featuring self-reflection, claim verification, and adaptive search depth.
 
 ## Features
