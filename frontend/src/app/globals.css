@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0f172a;
+  --foreground: #f1f5f9;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, monospace;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+/* ── Perspective Dial Slider ── */
+
+input[type="range"].perspective-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, #10b981, #f59e0b, #ef4444);
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"].perspective-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 12px #34d399, 0 0 4px #34d39980;
+  border: 2px solid #0f172a;
+  cursor: pointer;
+  transition: box-shadow 0.2s;
+}
+
+input[type="range"].perspective-slider::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 18px #34d399, 0 0 6px #34d399;
+}
+
+input[type="range"].perspective-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 12px #34d399, 0 0 4px #34d39980;
+  border: 2px solid #0f172a;
+  cursor: pointer;
+}
+
+/* ── Swarm Visualizer Animations ── */
+
+@keyframes swarm-draw {
+  from { stroke-dashoffset: 300; }
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes swarm-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@keyframes swarm-node-enter {
+  from { opacity: 0; r: 0; }
+  to { opacity: 1; }
+}
+
+.swarm-line {
+  stroke-dasharray: 300;
+  stroke-dashoffset: 300;
+  animation: swarm-draw 1.8s ease-out forwards;
+}
+
+.swarm-line-d1 { animation-delay: 0.3s; }
+.swarm-line-d2 { animation-delay: 0.6s; }
+.swarm-line-d3 { animation-delay: 1.0s; }
+.swarm-line-d4 { animation-delay: 1.2s; }
+.swarm-line-d5 { animation-delay: 1.4s; }
+.swarm-line-d6 { animation-delay: 1.6s; }
+
+.swarm-particle {
+  animation: swarm-pulse 1.6s ease-in-out infinite;
+}
+
+.swarm-node {
+  animation: swarm-node-enter 0.5s ease-out forwards;
+  opacity: 0;
+}
+
+.swarm-node-d1 { animation-delay: 0.2s; }
+.swarm-node-d2 { animation-delay: 0.5s; }
+.swarm-node-d3 { animation-delay: 0.9s; }
+.swarm-node-d4 { animation-delay: 1.1s; }
+.swarm-node-d5 { animation-delay: 1.3s; }
+.swarm-node-d6 { animation-delay: 1.5s; }
