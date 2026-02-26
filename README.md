@@ -1,5 +1,5 @@
 # Deep Search AI Agent
-![User Interface](images/deep_search_ai.png)
+
 A modern AI-powered research application that performs deep web searches, scrapes content, and synthesizes structured reports with citations. Built with a multi-agent architecture featuring self-reflection, claim verification, and adaptive search depth.
 
 ## Features
@@ -11,10 +11,11 @@ A modern AI-powered research application that performs deep web searches, scrape
 - **Academic** — Scholarly sources, papers, and research-grade analysis
 - **Fact Check** — Verify specific claims with evidence-based verdicts
 - **Deep Dive** — Exhaustive research with maximum sources and depth
+- **Social Media** — Community sentiment, trends, narratives, and hashtag/account signals
 
 **AI Models**
-- **GPT-4o Mini** (OpenAI) — Fast and capable
-- **Qwen Plus** (Alibaba DashScope) — Multilingual powerhouse
+- OpenAI, Qwen (DashScope), and local Ollama models
+- First-run setup modal supports provider selection, model dropdown + custom model ID, and key entry
 
 **Agentic Features**
 - **Self-Reflection** — Critic agent evaluates report quality and triggers refinement if needed
@@ -80,6 +81,11 @@ Open **http://localhost:3000** in your browser.
 
 That's it. Both backend and frontend are running with health checks.
 
+On first launch, complete the in-app setup flow:
+1. Choose LLM provider + model and provide API key (or Ollama base URL)
+2. Choose search provider (SerpAPI or Tavily) and provide key
+3. The backend applies settings immediately and persists to `.env` when writable
+
 ### Other commands
 
 ```bash
@@ -126,6 +132,8 @@ All settings are in `.env`. See `.env.example` for the full list with comments.
 | `OPENAI_TEMPERATURE` | No | `0.3` | LLM temperature (0-1) |
 | `QWEN_API_KEY` | No | — | Alibaba DashScope API key |
 | `QWEN_MODEL` | No | `qwen-plus` | Qwen model name |
+| `OLLAMA_MODEL` | No | `llama3.2` | Ollama model name |
+| `OLLAMA_BASE_URL` | No | `http://host.docker.internal:11434/v1` | Ollama OpenAI-compatible endpoint |
 | `SERPAPI_API_KEY` | Yes* | — | SerpAPI key (*or use Tavily) |
 | `SERPAPI_GL` | No | `us` | Google search country |
 | `SERPAPI_HL` | No | `en` | Google search language |
@@ -175,8 +183,8 @@ Streams research progress via Server-Sent Events.
 }
 ```
 
-**Modes**: `standard`, `debate`, `timeline`, `academic`, `fact_check`, `deep_dive`
-**Models**: `openai`, `qwen`
+**Modes**: `standard`, `debate`, `timeline`, `academic`, `fact_check`, `deep_dive`, `social_media`
+**Models**: `openai`, `qwen`, `ollama`
 
 ## Project Structure
 

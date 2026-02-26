@@ -67,15 +67,26 @@ MODEL_REGISTRY = {
         "api_key_env": "QWEN_API_KEY",
         "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     },
+    "ollama": {
+        "label": "Ollama Local",
+        "model": os.getenv("OLLAMA_MODEL", "llama3.2"),
+        "api_key_env": None,
+        "base_url": os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1"),
+    },
 }
 
 _llm_cache: dict[str, ChatOpenAI] = {}
 
 
-def _get_llm(model_id: str = "openai") -> ChatOpenAI:
+def clear_llm_cache() -> None:
+    _llm_cache.clear()
+
+
+def _get_llm(model_id: str = "openai", model_name: str | None = None) -> ChatOpenAI:
     """Get or create an LLM instance for the given model ID."""
-    if model_id in _llm_cache:
-        return _llm_cache[model_id]
+    cache_key = f"{model_id}:{(model_name or '').strip().lower()}"
+    if cache_key in _llm_cache:
+        return _llm_cache[cache_key]
 
     cfg = MODEL_REGISTRY.get(model_id)
     if not cfg:
@@ -83,31 +94,37 @@ def _get_llm(model_id: str = "openai") -> ChatOpenAI:
         cfg = MODEL_REGISTRY["openai"]
         model_id = "openai"
 
-    api_key = os.getenv(cfg["api_key_env"], "")
-    if not api_key:
-        raise RuntimeError(f"{cfg['api_key_env']} is not set in .env for model {cfg['label']}")
+    api_key_env = cfg.get("api_key_env")
+    api_key = os.getenv(api_key_env, "") if api_key_env else ""
+    if api_key_env and not api_key:
+        raise RuntimeError(f"{api_key_env} is not set in .env for model {cfg['label']}")
 
     # Each model gets its own httpx clients so auth headers don't leak across base URLs
     sync_client = httpx.Client(verify=_ssl_verify, timeout=30.0)
     async_client = httpx.AsyncClient(verify=_ssl_verify, timeout=30.0)
 
     kwargs: dict = {
-        "model": cfg["model"],
+        "model": (model_name or cfg["model"]).strip(),
         "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.3")),
-        "openai_api_key": api_key,
         "http_client": sync_client,
         "http_async_client": async_client,
     }
+    if api_key:
+        kwargs["openai_api_key"] = api_key
     if cfg["base_url"]:
         kwargs["base_url"] = cfg["base_url"]
 
     instance = ChatOpenAI(**kwargs)
-    _llm_cache[model_id] = instance
+    _llm_cache[cache_key] = instance
     return instance
 
 
-# Default LLM for backward compat
-llm = _get_llm("openai")
+# Default LLM for backward compatibility when available.
+try:
+    llm = _get_llm(os.getenv("DEFAULT_MODEL_PROVIDER", "openai"))
+except Exception as _bootstrap_llm_err:
+    llm = None
+    logger.warning("LLM bootstrap skipped at startup: %s", _bootstrap_llm_err)
 
 MAX_QUERY_LENGTH = 500
 MAX_SCRAPE_CONTENT = 6000
@@ -122,6 +139,7 @@ MODE_CONFIGS = {
     "academic": {"queries": 5, "sources": 12, "description": "scholarly/academic focus"},
     "fact_check": {"queries": 4, "sources": 10, "description": "claim verification focus"},
     "deep_dive": {"queries": 7, "sources": 15, "description": "exhaustive deep research"},
+    "social_media": {"queries": 6, "sources": 12, "description": "social media and community signals"},
 }
 
 # ---------------------------------------------------------------------------
@@ -332,6 +350,11 @@ def _mode_query_instructions(mode: str) -> str:
         return """- Generate 5-7 queries covering every angle: overview, details, controversies, expert opinions, statistics, comparisons, future outlook
 - Be extremely thorough and specific
 - Each query should target a distinct dimension of the topic"""
+    if mode == "social_media":
+        return """- Focus on social media and community discussions
+- Include platform-specific queries for X/Twitter, Reddit, YouTube, TikTok, LinkedIn, and Instagram where relevant
+- Include exact-handle and hashtag variants for people/topics
+- Add recency hints like "latest", "this week", and "trending" when useful"""
     return """- Each query should be distinct and target different aspects or angles
 - Use specific, searchable phrases"""
 
@@ -1062,6 +1085,15 @@ Write an EXHAUSTIVE deep-dive report. Structure:
 4. Address multiple perspectives and viewpoints
 5. Be thorough — aim for completeness over brevity
 6. Cite each claim with [Source N] format"""
+    if mode == "social_media":
+        return """
+Write a SOCIAL MEDIA research report. Structure:
+1. Separate verified facts from community sentiment
+2. Include platform-by-platform observations (X/Twitter, Reddit, YouTube, etc.)
+3. Highlight emerging narratives, influential accounts, and recurring hashtags
+4. Clearly mark unverified claims and potential misinformation patterns
+5. Add a "Signal vs Noise" subsection to summarize reliability
+6. Cite each claim with [Source N] format"""
     return """
 1. Write a clear, informative report with sections (use ## for main sections, ### for subsections)
 2. Include relevant facts, statistics, and insights from the sources
@@ -1090,6 +1122,7 @@ async def run_research_agent(
     mode: str = "standard",
     modes: list[str] | None = None,
     model_id: str = "openai",
+    model_name: str | None = None,
     recalled_memories: list[dict] | None = None,
 ) -> AsyncGenerator[dict, None]:
     step_ctx = "unknown"
@@ -1103,8 +1136,9 @@ async def run_research_agent(
     debate_mode = "debate" in active_modes
     primary_mode = active_modes[0]
 
-    active_llm = _get_llm(model_id)
-    model_label = MODEL_REGISTRY.get(model_id, {}).get("label", model_id)
+    active_llm = _get_llm(model_id, model_name=model_name)
+    selected_model_name = model_name or MODEL_REGISTRY.get(model_id, {}).get("model", model_id)
+    model_label = f"{MODEL_REGISTRY.get(model_id, {}).get('label', model_id)} ({selected_model_name})"
 
     try:
         query = _sanitize_query(query)

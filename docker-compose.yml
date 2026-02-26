@@ -9,6 +9,8 @@ services:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
+    volumes:
+      - ./.env:/app/.env
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
       interval: 15s
@@ -21,8 +23,6 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: http://localhost:${BACKEND_PORT:-8000}
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     depends_on:

@@ -66,7 +66,7 @@ dist: ## Build clean distributable package under ./dist
 	./build_dist.sh
 
 dev-backend: ## Run backend locally (no Docker)
-	cd backend && uv run --project .. uvicorn app.main:app --reload --port 8000
+	cd backend && uv run --project .. uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 dev-frontend: ## Run frontend locally (no Docker)
 	cd frontend && npm run dev
