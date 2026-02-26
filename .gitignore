@@ -19,3 +19,5 @@ chroma_data/memory_store.json
 
 # Generated distributable artifacts
 dist/
+
+.DS_Store
