@@ -32,11 +32,13 @@ import {
   Layers,
   Waypoints,
   Settings2,
+  Database,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Toaster, toast } from "sonner";
 import MemoryGraphWidget from "@/components/memory/MemoryGraphWidget";
 import DebateMode from "@/components/debate/DebateMode";
+import RAGMode from "@/components/RAGMode";
 import ModeCustomization, { DEFAULT_MODE_SETTINGS, type ModeSettings } from "@/components/ModeCustomization";
 
 // ---------------------------------------------------------------------------
@@ -136,7 +138,8 @@ type SearchMode =
   | "academic"
   | "fact_check"
   | "deep_dive"
-  | "social_media";
+  | "social_media"
+  | "rag";
 type ModelId = "openai" | "anthropic" | "grok" | "mistral" | "gemini" | "deepseek" | "qwen" | "ollama";
 type SearchProvider = "serpapi" | "tavily";
 
@@ -353,6 +356,13 @@ const MODE_CONFIG: Record<SearchMode, { label: string; description: string; colo
     color: "from-cyan-500 to-blue-500",
     activeColor: "border-cyan-500 bg-cyan-500/15 text-cyan-400",
     icon: <MessageSquarePlus className="h-4 w-4" />,
+  },
+  rag: {
+    label: "RAG",
+    description: "Knowledge base Q&A",
+    color: "from-orange-500 to-amber-500",
+    activeColor: "border-orange-500 bg-orange-500/15 text-orange-400",
+    icon: <Database className="h-4 w-4" />,
   },
 };
 
@@ -789,10 +799,11 @@ export default function Home() {
         next.delete(mode);
         if (next.size === 0) next.add("standard");
       } else {
-        if (mode !== "standard") next.delete("standard");
-        if (mode === "standard") {
-          return new Set(["standard"]);
+        if (mode === "standard" || mode === "rag") {
+          return new Set([mode]);
         }
+        next.delete("standard");
+        next.delete("rag");
         next.add(mode);
       }
       return next;
@@ -1094,6 +1105,7 @@ export default function Home() {
 
   const isDebateSwarm = isResearching && selectedModes.has("debate");
   const isDebateOnlyMode = selectedModes.has("debate") && selectedModes.size === 1;
+  const isRAGMode = selectedModes.has("rag") && selectedModes.size === 1;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", isDark);
@@ -1549,7 +1561,7 @@ export default function Home() {
             <span className="mb-3 block text-xs font-semibold uppercase tracking-wider text-slate-500">
               Research Modes <span className="font-normal normal-case text-slate-600">(select multiple)</span>
             </span>
-            <div className="grid grid-cols-4 gap-2 sm:grid-cols-7">
+            <div className="grid grid-cols-4 gap-2 sm:grid-cols-8">
               {(Object.entries(MODE_CONFIG) as [SearchMode, typeof MODE_CONFIG[SearchMode]][]).map(([mode, config]) => {
                 const active = selectedModes.has(mode);
                 return (
@@ -1608,6 +1620,18 @@ export default function Home() {
               modelId={modelId}
               modelName={modelName}
               isDark={isDark}
+            />
+          </div>
+        )}
+
+        {/* RAG Mode — Knowledge Base Q&A */}
+        {isRAGMode && (
+          <div className="mb-12">
+            <RAGMode
+              isDark={isDark}
+              modelId={modelId}
+              modelName={modelName}
+              perspectiveDial={perspectiveBias}
             />
           </div>
         )}

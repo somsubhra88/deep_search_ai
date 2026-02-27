@@ -46,6 +46,16 @@ from app.debate_engine import DebateOrchestrator
 from app.schemas.evidence import EvidenceCardList, EvidenceConfig
 from app.evidence.web_evidence_worker import collect_web_evidence
 from app.browsing.session_manager import BrowserSessionManager
+from app.kb_models import (
+    init_kb_db, create_kb, list_kbs, get_kb, delete_kb,
+    list_docs, delete_document,
+)
+from app.kb_ingest import ingest_single_file, ingest_files, ingest_zip
+from app.kb_retrieval import query_rag, query_rag_stream
+from app.kb_schemas import (
+    KBCreateRequest, KBResponse, DocumentResponse, DocStatusItem,
+    UploadResponse, RAGQueryRequest, RAGResponse,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -143,7 +153,7 @@ app.add_middleware(
         "http://frontend:3000",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -160,6 +170,7 @@ VALID_MODES = {
     "fact_check",
     "deep_dive",
     "social_media",
+    "rag",
 }
 VALID_MODELS = {"openai", "anthropic", "grok", "mistral", "gemini", "deepseek", "qwen", "ollama"}
 VALID_SEARCH_PROVIDERS = {"serpapi", "tavily"}
@@ -466,6 +477,11 @@ async def _startup():
         logger.info("Debate DB initialized")
     except Exception as e:
         logger.warning("Debate DB init failed (debate features unavailable): %s", e)
+    try:
+        init_kb_db()
+        logger.info("Knowledge Base DB initialized")
+    except Exception as e:
+        logger.warning("KB DB init failed (RAG features unavailable): %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +727,243 @@ async def collect_evidence(body: EvidenceCollectRequest, request: Request):
         max_cards_per_url=body.max_cards_per_url,
     )
     return result.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base — Management Endpoints
+# ---------------------------------------------------------------------------
+
+from fastapi import UploadFile, File, Form
+from typing import List
+
+
+@app.post("/api/kb/create")
+async def kb_create(body: KBCreateRequest):
+    kb = create_kb(body.name, body.description)
+    return KBResponse(
+        id=kb["id"],
+        name=kb["name"],
+        description=kb["description"],
+        created_at=kb["created_at"],
+        doc_count=0,
+    )
+
+
+@app.get("/api/kb/list")
+async def kb_list():
+    kbs = list_kbs()
+    return [
+        KBResponse(
+            id=kb["id"],
+            name=kb["name"],
+            description=kb["description"],
+            created_at=kb["created_at"],
+            doc_count=kb.get("doc_count", 0),
+        )
+        for kb in kbs
+    ]
+
+
+@app.get("/api/kb/{kb_id}/docs")
+async def kb_docs(kb_id: str):
+    kb = get_kb(kb_id)
+    if not kb:
+        raise HTTPException(404, "Knowledge base not found")
+    docs = list_docs(kb_id)
+    return [
+        DocumentResponse(
+            id=d["id"],
+            kb_id=d["kb_id"],
+            filename=d["filename"],
+            mime_type=d["mime_type"],
+            file_ext=d["file_ext"],
+            size_bytes=d["size_bytes"],
+            content_hash_sha256=d["content_hash_sha256"],
+            source_type=d["source_type"],
+            relative_path=d["relative_path"],
+            status=d["status"],
+            error_message=d.get("error_message"),
+            created_at=d["created_at"],
+            updated_at=d["updated_at"],
+            chunk_count=d.get("chunk_count", 0),
+        )
+        for d in docs
+    ]
+
+
+@app.delete("/api/kb/{kb_id}")
+async def kb_delete(kb_id: str):
+    if delete_kb(kb_id):
+        return {"status": "deleted", "kb_id": kb_id}
+    raise HTTPException(404, "Knowledge base not found")
+
+
+@app.delete("/api/kb/{kb_id}/doc/{doc_id}")
+async def kb_doc_delete(kb_id: str, doc_id: str):
+    if delete_document(doc_id):
+        return {"status": "deleted", "doc_id": doc_id}
+    raise HTTPException(404, "Document not found")
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base — Upload / Import Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/kb/{kb_id}/upload")
+async def kb_upload(
+    kb_id: str,
+    files: List[UploadFile] = File(...),
+    force_reindex: bool = Form(default=False),
+):
+    """Upload one or more files to a knowledge base."""
+    kb = get_kb(kb_id)
+    if not kb:
+        raise HTTPException(404, "Knowledge base not found")
+
+    results: list[dict] = []
+    for f in files:
+        file_bytes = await f.read()
+        r = ingest_single_file(
+            kb_id=kb_id,
+            filename=f.filename or "unknown",
+            file_bytes=file_bytes,
+            source_type="upload",
+            force_reindex=force_reindex,
+        )
+        results.append(r)
+
+    indexed = sum(1 for r in results if r["status"] == "indexed")
+    skipped = sum(1 for r in results if r["status"] == "skipped_cached")
+    failed = sum(1 for r in results if r["status"] == "failed")
+
+    return UploadResponse(
+        kb_id=kb_id,
+        results=[DocStatusItem(**r) for r in results],
+        total_files=len(results),
+        indexed=indexed,
+        skipped_cached=skipped,
+        failed=failed,
+    )
+
+
+@app.post("/api/kb/{kb_id}/upload-directory")
+async def kb_upload_directory(
+    kb_id: str,
+    files: List[UploadFile] = File(...),
+    force_reindex: bool = Form(default=False),
+):
+    """Upload directory contents (via webkitdirectory)."""
+    kb = get_kb(kb_id)
+    if not kb:
+        raise HTTPException(404, "Knowledge base not found")
+
+    file_pairs: list[tuple[str, bytes]] = []
+    for f in files:
+        data = await f.read()
+        file_pairs.append((f.filename or "unknown", data))
+
+    results = ingest_files(
+        kb_id=kb_id,
+        files=file_pairs,
+        source_type="folder",
+        force_reindex=force_reindex,
+    )
+
+    indexed = sum(1 for r in results if r["status"] == "indexed")
+    skipped = sum(1 for r in results if r["status"] == "skipped_cached")
+    failed = sum(1 for r in results if r["status"] == "failed")
+
+    return UploadResponse(
+        kb_id=kb_id,
+        results=[DocStatusItem(**r) for r in results],
+        total_files=len(results),
+        indexed=indexed,
+        skipped_cached=skipped,
+        failed=failed,
+    )
+
+
+@app.post("/api/kb/{kb_id}/upload-zip")
+async def kb_upload_zip(
+    kb_id: str,
+    file: UploadFile = File(...),
+    force_reindex: bool = Form(default=False),
+):
+    """Upload a zip file and ingest all supported files inside."""
+    kb = get_kb(kb_id)
+    if not kb:
+        raise HTTPException(404, "Knowledge base not found")
+
+    zip_bytes = await file.read()
+    results = ingest_zip(
+        kb_id=kb_id,
+        zip_bytes=zip_bytes,
+        force_reindex=force_reindex,
+    )
+
+    indexed = sum(1 for r in results if r["status"] == "indexed")
+    skipped = sum(1 for r in results if r["status"] == "skipped_cached")
+    failed = sum(1 for r in results if r["status"] == "failed")
+
+    return UploadResponse(
+        kb_id=kb_id,
+        results=[DocStatusItem(**r) for r in results],
+        total_files=len(results),
+        indexed=indexed,
+        skipped_cached=skipped,
+        failed=failed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# RAG Query Endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/rag/query")
+async def rag_query(body: RAGQueryRequest):
+    """Synchronous RAG query — returns full grounded response."""
+    kb = get_kb(body.kb_id)
+    if not kb:
+        raise HTTPException(404, "Knowledge base not found")
+
+    response = await query_rag(
+        kb_id=body.kb_id,
+        query=body.query,
+        scope=body.scope,
+        top_k_kb=body.top_k_kb,
+        top_k_web=body.top_k_web,
+        model_id=body.model_id,
+        model_name=body.model_name,
+    )
+    return response.model_dump()
+
+
+@app.post("/api/rag/query/stream")
+async def rag_query_stream(request: Request, body: RAGQueryRequest):
+    """SSE streaming RAG query."""
+    kb = get_kb(body.kb_id)
+    if not kb:
+        raise HTTPException(404, "Knowledge base not found")
+
+    async def event_generator():
+        try:
+            async for event in query_rag_stream(
+                kb_id=body.kb_id,
+                query=body.query,
+                scope=body.scope,
+                top_k_kb=body.top_k_kb,
+                top_k_web=body.top_k_web,
+                model_id=body.model_id,
+                model_name=body.model_name,
+            ):
+                if await request.is_disconnected():
+                    break
+                yield {"event": event["event"], "data": json.dumps(event["data"])}
+        except Exception as e:
+            err_msg = _sanitize_error(str(e))
+            yield {"event": "rag.error", "data": json.dumps({"error": err_msg})}
+
+    return EventSourceResponse(event_generator())
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,10 @@ sse-starlette>=2.0.0
 # Ephemeral RAG — in-memory vector store + embeddings
 numpy>=1.26.0
 
+# Knowledge Base — document processing
+PyMuPDF>=1.24.0
+python-docx>=1.1.0
+
 # Semantic cache (optional Redis backend)
 redis>=5.0.0
 

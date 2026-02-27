@@ -187,6 +187,12 @@ MODE_EVIDENCE_DEFAULTS: dict[str, EvidenceConfig] = {
         use_ephemeral_rag=False,
         use_evidence_cards=False,
     ),
+    "rag": EvidenceConfig(
+        use_ephemeral_rag=True,
+        use_evidence_cards=True,
+        top_k_chunks=6,
+        max_total_context_chars=6_000,
+    ),
 }
 
 
