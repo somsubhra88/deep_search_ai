@@ -6,6 +6,7 @@ uvicorn[standard]>=0.32.0
 google-search-results>=2.4.2
 langchain>=1.2.10
 langchain-openai>=1.1.10
+langchain-anthropic>=0.3.0
 langgraph>=1.0.8
 pydantic>=2.12.5
 python-dateutil>=2.9.0.post0
@@ -21,3 +22,13 @@ openai>=1.50.0
 # CORS & SSE
 python-multipart>=0.0.9
 sse-starlette>=2.0.0
+
+# Ephemeral RAG — in-memory vector store + embeddings
+numpy>=1.26.0
+
+# Semantic cache (optional Redis backend)
+redis>=5.0.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.24.0

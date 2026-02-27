@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { ArrowLeftRight, Shuffle, Play, Settings2 } from "lucide-react";
+import { ArrowLeftRight, Shuffle, Play, Settings2, FileSearch, Plus, X } from "lucide-react";
 import PersonaCard from "./PersonaCard";
 import {
   PersonaConfig,
@@ -51,6 +51,7 @@ const DEFAULT_CONFIG: DebateConfig = {
   max_sentences_per_message: 15,
   no_repetition: true,
   retrieval_enabled: false,
+  evidence_urls: [],
 };
 
 export default function DebateSettingsPanel({ topic, perspectiveDial, modelId, modelName, isDark, onStart }: Props) {
@@ -174,29 +175,70 @@ export default function DebateSettingsPanel({ topic, perspectiveDial, modelId, m
         {showAdvanced ? "Hide advanced settings" : "Show advanced settings"}
       </button>
       {showAdvanced && (
-        <div className="mb-5 grid gap-3 sm:grid-cols-3">
-          <label className="block">
-            <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Max Sentences</span>
-            <input type="number" min={3} max={50} value={config.max_sentences_per_message}
-              onChange={(e) => setConfig((c) => ({ ...c, max_sentences_per_message: Number(e.target.value) }))}
-              className={`w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none ${isDark ? "border-slate-600/60 bg-slate-800/60 text-slate-200" : "border-slate-300 bg-white text-slate-800"}`}
-            />
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="checkbox" checked={config.no_repetition}
-              onChange={(e) => setConfig((c) => ({ ...c, no_repetition: e.target.checked }))}
-              className="h-4 w-4 rounded border-slate-600 bg-slate-700 text-violet-600"
-            />
-            <span className="text-xs text-slate-400">No repetition</span>
-          </label>
-          <label className="flex items-center gap-2">
-            <input type="checkbox" checked={config.retrieval_enabled}
-              onChange={(e) => setConfig((c) => ({ ...c, retrieval_enabled: e.target.checked }))}
-              className="h-4 w-4 rounded border-slate-600 bg-slate-700 text-violet-600"
-            />
-            <span className="text-xs text-slate-400">Use retrieval</span>
-          </label>
-        </div>
+        <>
+          <div className="mb-5 grid gap-3 sm:grid-cols-3">
+            <label className="block">
+              <span className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Max Sentences</span>
+              <input type="number" min={3} max={50} value={config.max_sentences_per_message}
+                onChange={(e) => setConfig((c) => ({ ...c, max_sentences_per_message: Number(e.target.value) }))}
+                className={`w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none ${isDark ? "border-slate-600/60 bg-slate-800/60 text-slate-200" : "border-slate-300 bg-white text-slate-800"}`}
+              />
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={config.no_repetition}
+                onChange={(e) => setConfig((c) => ({ ...c, no_repetition: e.target.checked }))}
+                className="h-4 w-4 rounded border-slate-600 bg-slate-700 text-violet-600"
+              />
+              <span className="text-xs text-slate-400">No repetition</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={config.retrieval_enabled}
+                onChange={(e) => setConfig((c) => ({ ...c, retrieval_enabled: e.target.checked }))}
+                className="h-4 w-4 rounded border-slate-600 bg-slate-700 text-violet-600"
+              />
+              <span className="flex items-center gap-1 text-xs text-slate-400">
+                <FileSearch className="h-3 w-3" /> Retrieval Evidence
+              </span>
+            </label>
+          </div>
+
+          {config.retrieval_enabled && (
+            <div className={`mb-4 rounded-xl border p-3 ${isDark ? "border-sky-500/20 bg-sky-500/5" : "border-sky-200 bg-sky-50/50"}`}>
+              <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-slate-500">
+                Evidence URLs (optional — leave empty to auto-search)
+              </p>
+              {config.evidence_urls.map((url, i) => (
+                <div key={i} className="mb-1.5 flex items-center gap-1.5">
+                  <input
+                    type="url"
+                    value={url}
+                    placeholder="https://..."
+                    onChange={(e) => {
+                      const urls = [...config.evidence_urls];
+                      urls[i] = e.target.value;
+                      setConfig((c) => ({ ...c, evidence_urls: urls }));
+                    }}
+                    className={`flex-1 rounded-lg border px-2.5 py-1.5 text-xs outline-none ${isDark ? "border-slate-600/60 bg-slate-800/60 text-slate-200 placeholder:text-slate-600" : "border-slate-300 bg-white text-slate-800 placeholder:text-slate-400"}`}
+                  />
+                  <button
+                    onClick={() => setConfig((c) => ({ ...c, evidence_urls: c.evidence_urls.filter((_, j) => j !== i) }))}
+                    className="rounded p-1 text-red-400 hover:bg-red-500/10"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+              {config.evidence_urls.length < 10 && (
+                <button
+                  onClick={() => setConfig((c) => ({ ...c, evidence_urls: [...c.evidence_urls, ""] }))}
+                  className={`flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[10px] font-medium ${isDark ? "text-sky-400 hover:bg-sky-500/10" : "text-sky-600 hover:bg-sky-100"}`}
+                >
+                  <Plus className="h-3 w-3" /> Add URL
+                </button>
+              )}
+            </div>
+          )}
+        </>
       )}
 
       {/* Start button */}

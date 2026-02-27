@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import DebateSettingsPanel from "./DebateSettingsPanel";
 import DebateChatTimeline from "./DebateChatTimeline";
 import DebateArtifactsPanel from "./DebateArtifactsPanel";
+import EvidenceCardsPanel from "./EvidenceCardsPanel";
 import {
   DebateMessage,
   DebateArtifacts,
@@ -13,6 +14,7 @@ import {
   PersonaConfig,
   AgentProfile,
   DebateConfig,
+  EvidenceCard,
 } from "./types";
 
 type Props = {
@@ -32,6 +34,9 @@ export default function DebateMode({ topic, perspectiveDial, modelId, modelName,
   const [personaB, setPersonaB] = useState<PersonaConfig>({ gender: "neutral", profession: "", attitude: "logical", style: "formal" });
   const [artifactStep, setArtifactStep] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [forCards, setForCards] = useState<EvidenceCard[]>([]);
+  const [againstCards, setAgainstCards] = useState<EvidenceCard[]>([]);
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   const startDebate = useCallback(async (payload: {
@@ -48,6 +53,9 @@ export default function DebateMode({ topic, perspectiveDial, modelId, modelName,
     setArtifacts(null);
     setError(null);
     setArtifactStep(null);
+    setForCards([]);
+    setAgainstCards([]);
+    setEvidenceLoading(false);
     setPersonaA(payload.agent_a.persona);
     setPersonaB(payload.agent_b.persona);
 
@@ -94,6 +102,22 @@ export default function DebateMode({ topic, perspectiveDial, modelId, modelName,
               switch (currentEvent) {
                 case "debate.started":
                   setSessionId(data.sessionId);
+                  break;
+
+                case "evidence.started":
+                  setEvidenceLoading(true);
+                  break;
+
+                case "evidence.ready":
+                  setEvidenceLoading(false);
+                  if (data.cards) {
+                    setForCards(data.cards.for || []);
+                    setAgainstCards(data.cards.against || []);
+                  }
+                  break;
+
+                case "evidence.error":
+                  setEvidenceLoading(false);
                   break;
 
                 case "message.started":
@@ -195,6 +219,9 @@ export default function DebateMode({ topic, perspectiveDial, modelId, modelName,
     setArtifacts(null);
     setError(null);
     setArtifactStep(null);
+    setForCards([]);
+    setAgainstCards([]);
+    setEvidenceLoading(false);
   }, []);
 
   return (
@@ -239,6 +266,19 @@ export default function DebateMode({ topic, perspectiveDial, modelId, modelName,
       {/* Running / Completed */}
       {(status === "running" || status === "completed" || status === "cancelled" || status === "error") && (
         <div className="space-y-4">
+          {/* Evidence loading indicator */}
+          {evidenceLoading && (
+            <div className={`flex items-center gap-2 rounded-xl border p-4 ${isDark ? "border-sky-500/30 bg-sky-500/5" : "border-sky-200 bg-sky-50"}`}>
+              <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
+              <span className="text-sm text-sky-400">Retrieving evidence from web sources...</span>
+            </div>
+          )}
+
+          {/* Evidence cards */}
+          {(forCards.length > 0 || againstCards.length > 0) && (
+            <EvidenceCardsPanel forCards={forCards} againstCards={againstCards} isDark={isDark} />
+          )}
+
           {/* Chat */}
           {messages.length > 0 && (
             <DebateChatTimeline

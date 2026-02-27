@@ -25,9 +25,15 @@ from collections import OrderedDict
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+from langchain_core.language_models.chat_models import BaseChatModel
 import httpx
 from bs4 import BeautifulSoup
 from app.memory_graph import store_search_memory
+from app.rag.chunking import chunk_text
+from app.rag.ephemeral_store import InMemoryVectorStore
+from app.rerank.bm25 import BM25Reranker
+from app.models.router import ModelRouter, ModelCascadeConfig
+from app.schemas.evidence import EvidenceConfig, get_evidence_config
 
 import pathlib
 _base = pathlib.Path(__file__).resolve().parents[2]
@@ -56,33 +62,71 @@ _http_client = httpx.Client(verify=_ssl_verify, timeout=30.0)
 
 MODEL_REGISTRY = {
     "openai": {
-        "label": "GPT-4o Mini",
+        "label": "OpenAI",
         "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         "api_key_env": "OPENAI_API_KEY",
         "base_url": None,
+        "client_class": "ChatOpenAI",
+    },
+    "anthropic": {
+        "label": "Anthropic Claude",
+        "model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "base_url": None,
+        "client_class": "ChatAnthropic",
+    },
+    "grok": {
+        "label": "xAI Grok",
+        "model": os.getenv("GROK_MODEL", "grok-3"),
+        "api_key_env": "GROK_API_KEY",
+        "base_url": "https://api.x.ai/v1",
+        "client_class": "ChatOpenAI",
+    },
+    "mistral": {
+        "label": "Mistral AI",
+        "model": os.getenv("MISTRAL_MODEL", "mistral-large-latest"),
+        "api_key_env": "MISTRAL_API_KEY",
+        "base_url": "https://api.mistral.ai/v1",
+        "client_class": "ChatOpenAI",
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "model": os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        "api_key_env": "GEMINI_API_KEY",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "client_class": "ChatOpenAI",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url": "https://api.deepseek.com/v1",
+        "client_class": "ChatOpenAI",
     },
     "qwen": {
-        "label": "Qwen Plus",
+        "label": "Qwen (DashScope)",
         "model": os.getenv("QWEN_MODEL", "qwen-plus"),
         "api_key_env": "QWEN_API_KEY",
         "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "client_class": "ChatOpenAI",
     },
     "ollama": {
         "label": "Ollama Local",
         "model": os.getenv("OLLAMA_MODEL", "llama3.2"),
         "api_key_env": None,
         "base_url": os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1"),
+        "client_class": "ChatOpenAI",
     },
 }
 
-_llm_cache: dict[str, ChatOpenAI] = {}
+_llm_cache: dict[str, BaseChatModel] = {}
 
 
 def clear_llm_cache() -> None:
     _llm_cache.clear()
 
 
-def _get_llm(model_id: str = "openai", model_name: str | None = None) -> ChatOpenAI:
+def _get_llm(model_id: str = "openai", model_name: str | None = None) -> BaseChatModel:
     """Get or create an LLM instance for the given model ID."""
     cache_key = f"{model_id}:{(model_name or '').strip().lower()}"
     if cache_key in _llm_cache:
@@ -99,22 +143,35 @@ def _get_llm(model_id: str = "openai", model_name: str | None = None) -> ChatOpe
     if api_key_env and not api_key:
         raise RuntimeError(f"{api_key_env} is not set in .env for model {cfg['label']}")
 
-    # Each model gets its own httpx clients so auth headers don't leak across base URLs
-    sync_client = httpx.Client(verify=_ssl_verify, timeout=30.0)
-    async_client = httpx.AsyncClient(verify=_ssl_verify, timeout=30.0)
+    resolved_model = (model_name or cfg["model"]).strip()
+    temperature = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
 
-    kwargs: dict = {
-        "model": (model_name or cfg["model"]).strip(),
-        "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.3")),
-        "http_client": sync_client,
-        "http_async_client": async_client,
-    }
-    if api_key:
-        kwargs["openai_api_key"] = api_key
-    if cfg["base_url"]:
-        kwargs["base_url"] = cfg["base_url"]
+    if cfg.get("client_class") == "ChatAnthropic":
+        try:
+            from langchain_anthropic import ChatAnthropic
+        except ImportError:
+            raise RuntimeError("langchain-anthropic is required for Anthropic models. Install with: pip install langchain-anthropic")
+        instance = ChatAnthropic(
+            model=resolved_model,
+            anthropic_api_key=api_key,
+            temperature=temperature,
+            max_tokens=4096,
+        )
+    else:
+        sync_client = httpx.Client(verify=_ssl_verify, timeout=30.0)
+        async_client = httpx.AsyncClient(verify=_ssl_verify, timeout=30.0)
+        kwargs: dict = {
+            "model": resolved_model,
+            "temperature": temperature,
+            "http_client": sync_client,
+            "http_async_client": async_client,
+        }
+        if api_key:
+            kwargs["openai_api_key"] = api_key
+        if cfg["base_url"]:
+            kwargs["base_url"] = cfg["base_url"]
+        instance = ChatOpenAI(**kwargs)
 
-    instance = ChatOpenAI(**kwargs)
     _llm_cache[cache_key] = instance
     return instance
 
@@ -330,31 +387,107 @@ async def _emit_step(step: str, detail: str = "", data: dict = None) -> dict:
 # Query Generation
 # ---------------------------------------------------------------------------
 
-def _mode_query_instructions(mode: str) -> str:
+_ACADEMIC_DOMAIN_MAP = {
+    "arxiv": "arxiv.org", "scholar": "scholar.google.com",
+    "pubmed": "pubmed.ncbi.nlm.nih.gov", "ieee": "ieeexplore.ieee.org",
+    "nature": "nature.com", "science": "science.org",
+    "springer": "link.springer.com", "jstor": "jstor.org",
+    "ssrn": "ssrn.com", "semanticscholar": "semanticscholar.org",
+}
+_SOCIAL_DOMAIN_MAP = {
+    "twitter": "twitter.com", "reddit": "reddit.com",
+    "linkedin": "linkedin.com", "facebook": "facebook.com",
+    "instagram": "instagram.com", "youtube": "youtube.com",
+    "tiktok": "tiktok.com", "mastodon": "mastodon.social",
+}
+_FACTCHECK_DOMAIN_MAP = {
+    "snopes": "snopes.com", "politifact": "politifact.com",
+    "factcheck": "factcheck.org", "reuters": "reuters.com",
+    "apnews": "apnews.com", "bbc": "bbc.com",
+    "nytimes": "nytimes.com", "washpost": "washingtonpost.com",
+    "guardian": "theguardian.com", "fullfact": "fullfact.org",
+}
+
+
+def _build_site_filter(selected_ids: list[str], domain_map: dict[str, str]) -> str:
+    """Build site: filter string from selected IDs. Empty string if all selected."""
+    all_ids = set(domain_map.keys())
+    selected = set(selected_ids) if selected_ids else all_ids
+    if selected >= all_ids:
+        domains = list(domain_map.values())[:3]
+    else:
+        domains = [domain_map[sid] for sid in selected if sid in domain_map]
+    if not domains:
+        return ""
+    return " OR ".join(f"site:{d}" for d in domains)
+
+
+def _mode_query_instructions(mode: str, mode_settings: dict | None = None) -> str:
     """Return mode-specific instructions for query generation."""
+    ms = mode_settings or {}
+
     if mode == "timeline":
-        return """- Focus on chronological aspects: history, evolution, key dates, milestones
+        time_range = ms.get("timeline_range", "all")
+        focus_areas = ms.get("timeline_focus", ["general"])
+        range_hint = ""
+        if time_range == "1y":
+            range_hint = '- Append time hints like "2025-2026", "last year", "recent" to queries'
+        elif time_range == "5y":
+            range_hint = '- Append time hints like "2021-2026", "last 5 years" to queries'
+        elif time_range == "10y":
+            range_hint = '- Append time hints like "2016-2026", "last decade" to queries'
+        focus_hint = ""
+        if focus_areas and "general" not in focus_areas:
+            focus_hint = f'- Focus on these areas: {", ".join(focus_areas)}. Weight queries toward these domains.'
+        return f"""- Focus on chronological aspects: history, evolution, key dates, milestones
 - Include queries like "[topic] history timeline", "[topic] evolution over years", "[topic] key milestones"
-- Target date-specific searches where relevant"""
+- Target date-specific searches where relevant
+{range_hint}
+{focus_hint}"""
+
     if mode == "academic":
-        return """- Focus on scholarly and academic sources
+        selected = ms.get("academic_sites", list(_ACADEMIC_DOMAIN_MAP.keys()))
+        site_filter = _build_site_filter(selected, _ACADEMIC_DOMAIN_MAP)
+        domains = [_ACADEMIC_DOMAIN_MAP[s] for s in selected if s in _ACADEMIC_DOMAIN_MAP][:4]
+        site_directives = " ".join(f"site:{d}" for d in domains) if domains else "site:scholar.google.com site:arxiv.org"
+        return f"""- Focus on scholarly and academic sources
 - Include queries with "research paper", "study", "meta-analysis", "peer-reviewed"
-- Add site:scholar.google.com, site:arxiv.org, site:pubmed.ncbi.nlm.nih.gov for at least 1 query
-- Target scientific and academic terminology"""
+- For at least 1-2 queries, restrict to these sites: {site_directives}
+- Target scientific and academic terminology
+- Preferred sources: {', '.join(domains[:6])}"""
+
     if mode == "fact_check":
-        return """- Focus on fact-checking and verification
+        selected = ms.get("factcheck_sites", list(_FACTCHECK_DOMAIN_MAP.keys()))
+        domains = [_FACTCHECK_DOMAIN_MAP[s] for s in selected if s in _FACTCHECK_DOMAIN_MAP][:4]
+        site_directives = " ".join(f"site:{d}" for d in domains) if domains else "site:snopes.com site:factcheck.org site:politifact.com"
+        return f"""- Focus on fact-checking and verification
 - Include queries that seek primary sources, official statistics, original reports
-- Add site:snopes.com, site:factcheck.org, site:politifact.com for at least 1 query
-- Target claim-specific and evidence-based searches"""
+- For at least 1-2 queries, restrict to these sites: {site_directives}
+- Target claim-specific and evidence-based searches
+- Preferred sources: {', '.join(d for d in [_FACTCHECK_DOMAIN_MAP.get(s,'') for s in selected] if d)[:200]}"""
+
     if mode == "deep_dive":
-        return """- Generate 5-7 queries covering every angle: overview, details, controversies, expert opinions, statistics, comparisons, future outlook
+        depth = ms.get("deep_dive_depth", "thorough")
+        include_technical = ms.get("deep_dive_include_technical", True)
+        depth_map = {"moderate": "5", "thorough": "5-7", "exhaustive": "7-9"}
+        q_range = depth_map.get(depth, "5-7")
+        tech_hint = "\n- Include queries targeting technical papers, patents, and specifications" if include_technical else ""
+        return f"""- Generate {q_range} queries covering every angle: overview, details, controversies, expert opinions, statistics, comparisons, future outlook
 - Be extremely thorough and specific
-- Each query should target a distinct dimension of the topic"""
+- Each query should target a distinct dimension of the topic{tech_hint}
+- Depth level: {depth} — {"maximum breadth and depth, leave no stone unturned" if depth == "exhaustive" else "thorough coverage of major angles" if depth == "thorough" else "focused coverage of key aspects"}"""
+
     if mode == "social_media":
-        return """- Focus on social media and community discussions
-- Include platform-specific queries for X/Twitter, Reddit, YouTube, TikTok, LinkedIn, and Instagram where relevant
+        selected = ms.get("social_platforms", list(_SOCIAL_DOMAIN_MAP.keys()))
+        domains = [_SOCIAL_DOMAIN_MAP[s] for s in selected if s in _SOCIAL_DOMAIN_MAP]
+        platform_names = [s.replace("twitter", "X/Twitter").title() for s in selected if s in _SOCIAL_DOMAIN_MAP]
+        site_directives = ", ".join(f"site:{d}" for d in domains[:5])
+        return f"""- Focus on social media and community discussions
+- Include platform-specific queries for: {', '.join(platform_names)}
+- For site-restricted queries, use: {site_directives}
 - Include exact-handle and hashtag variants for people/topics
 - Add recency hints like "latest", "this week", and "trending" when useful"""
+
     return """- Each query should be distinct and target different aspects or angles
 - Use specific, searchable phrases"""
 
@@ -362,6 +495,7 @@ def _mode_query_instructions(mode: str) -> str:
 async def _generate_search_queries(
     query: str, is_social: bool = False, budget: TokenBudget = None,
     mode: str = "standard", active_llm: ChatOpenAI = None,
+    mode_settings: dict | None = None,
 ) -> list[str]:
     active_llm = active_llm or llm
     mode_cfg = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
@@ -379,7 +513,7 @@ Generate exactly 3-5 search queries to find information about this person/tag/ha
 - Output ONLY a JSON array of strings. Example: ["@user site:twitter.com", "#hashtag site:instagram.com"]
 """
     else:
-        mode_instructions = _mode_query_instructions(mode)
+        mode_instructions = _mode_query_instructions(mode, mode_settings)
         prompt = f"""You are a research assistant. Given the user's topic below, generate exactly {max_queries} specific, focused search queries that will help find comprehensive information.
 
 Topic: {query}
@@ -1124,6 +1258,7 @@ async def run_research_agent(
     model_id: str = "openai",
     model_name: str | None = None,
     recalled_memories: list[dict] | None = None,
+    mode_settings: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
     step_ctx = "unknown"
     budget = TokenBudget()
@@ -1160,13 +1295,13 @@ async def run_research_agent(
         is_social = _is_social_query(query)
         queries = await _generate_search_queries(
             query, is_social=is_social, budget=budget, mode=primary_mode,
-            active_llm=active_llm,
+            active_llm=active_llm, mode_settings=mode_settings,
         )
         # If multiple modes, add extra mode-specific queries
         for extra_mode in active_modes[1:]:
             extra = await _generate_search_queries(
                 query, is_social=is_social, budget=budget, mode=extra_mode,
-                active_llm=active_llm,
+                active_llm=active_llm, mode_settings=mode_settings,
             )
             for q in extra:
                 if q not in queries:
@@ -1217,6 +1352,8 @@ async def run_research_agent(
         step_ctx = "content_gathering"
         scraped: list[dict] = []
         max_sources = mode_cfg.get("sources", MAX_TOTAL_SOURCES)
+        if "deep_dive" in active_modes and mode_settings and mode_settings.get("deep_dive_max_sources"):
+            max_sources = max(max_sources, min(int(mode_settings["deep_dive_max_sources"]), 30))
         targets = unique_results[:max_sources]
 
         if use_snippets_only:
@@ -1247,36 +1384,96 @@ async def run_research_agent(
             scraped = list(await asyncio.gather(*[_scrape_one(r) for r in targets]))
             yield await _emit_step("scraping_done", f"Scraped {len(scraped)} sources")
 
-        # Step 4: Synthesize report (with token-aware content)
-        step_ctx = "synthesis"
-        yield await _emit_step("synthesizing", "Writing report with citations...")
-
-        sources_text = "\n\n---\n\n".join(
-            f"[Source {i+1}] {s['title']}\nURL: {s['url']}\n\n{budget.smart_truncate(s['content'], 3000)}"
-            for i, s in enumerate(scraped)
+        # Step 4: Build ephemeral RAG store + pre-filter with BM25
+        step_ctx = "rag_indexing"
+        ev_config = get_evidence_config(primary_mode)
+        ephemeral_store = None
+        reranker = BM25Reranker() if ev_config.use_reranking else None
+        model_router = ModelRouter(
+            main_llm=active_llm,
+            main_model_id=model_id,
+            main_model_name=model_name or "",
+            get_llm_fn=_get_llm,
         )
 
-        safe_instruction = ""
-        if safe_search:
-            safe_instruction = "\nAlso: Exclude any adult/explicit content. Focus on professional, factual information."
+        if ev_config.use_ephemeral_rag:
+            yield await _emit_step("rag_indexing", "Building search index for precise retrieval...")
+            from app.rag.embeddings import get_embedder
+            embedder = get_embedder()
+            ephemeral_store = InMemoryVectorStore(embedder=embedder)
 
-        all_instructions = []
-        for m in active_modes:
-            inst = _mode_synthesis_instructions(m)
-            if inst not in all_instructions:
-                all_instructions.append(inst)
-        mode_instructions = "\n".join(all_instructions)
+            for s in scraped:
+                text = s.get("content", "")
+                if text and len(text.strip()) > 40:
+                    chunks = chunk_text(text, source_url=s.get("url", ""))
+                    if reranker:
+                        chunks = reranker.rerank(query, chunks)
+                    ephemeral_store.add_chunks(chunks)
 
-        memory_context = ""
-        if recalled_memories:
-            essences = [m["essence"] for m in recalled_memories[:3]]
-            memory_context = (
-                "\n\nNote: The user previously researched related topics. "
-                f"Past context: {'; '.join(essences)}. "
-                "Use this context to build upon prior knowledge and avoid redundancy.\n"
+            yield await _emit_step("rag_indexed", f"Indexed {ephemeral_store.size} chunks from {len(scraped)} sources")
+
+        # Step 4b: Check for map-reduce path (Deep Dive / Academic)
+        step_ctx = "synthesis"
+        use_map_reduce = ev_config.map_reduce_enabled and len(scraped) >= 3
+
+        if use_map_reduce:
+            yield await _emit_step("synthesizing", "Running map-reduce synthesis pipeline...")
+            from app.summarize.map_reduce import map_reduce_pipeline
+            map_llm = model_router.get_llm("map_summarization")
+            reduce_llm = model_router.get_llm("reduce_synthesis")
+            report_content = await map_reduce_pipeline(
+                query=query,
+                sources=scraped,
+                map_llm=map_llm,
+                reduce_llm=reduce_llm,
+                mode=primary_mode,
             )
+            budget.track("map_reduce_synthesis", f"map-reduce for {len(scraped)} sources", report_content)
+        else:
+            yield await _emit_step("synthesizing", "Writing report with citations...")
 
-        synthesis_prompt = f"""You are a research analyst. Synthesize the following sources into a comprehensive, well-structured Markdown report.
+            if ephemeral_store and ephemeral_store.size > 0:
+                top_chunks = ephemeral_store.query(
+                    query,
+                    top_k=ev_config.top_k_chunks,
+                    max_total_chars=ev_config.max_total_context_chars,
+                )
+                sources_text = "\n\n---\n\n".join(
+                    f"[Chunk from {c.source_url}]\n{c.text}"
+                    for c in top_chunks
+                )
+                source_refs = "\n".join(
+                    f"[Source {i+1}] {s['title']} — {s['url']}"
+                    for i, s in enumerate(scraped)
+                )
+                sources_text += f"\n\nFull source list:\n{source_refs}"
+            else:
+                sources_text = "\n\n---\n\n".join(
+                    f"[Source {i+1}] {s['title']}\nURL: {s['url']}\n\n{budget.smart_truncate(s['content'], 3000)}"
+                    for i, s in enumerate(scraped)
+                )
+
+            safe_instruction = ""
+            if safe_search:
+                safe_instruction = "\nAlso: Exclude any adult/explicit content. Focus on professional, factual information."
+
+            all_instructions = []
+            for m in active_modes:
+                inst = _mode_synthesis_instructions(m)
+                if inst not in all_instructions:
+                    all_instructions.append(inst)
+            mode_instructions = "\n".join(all_instructions)
+
+            memory_context = ""
+            if recalled_memories:
+                essences = [m["essence"] for m in recalled_memories[:3]]
+                memory_context = (
+                    "\n\nNote: The user previously researched related topics. "
+                    f"Past context: {'; '.join(essences)}. "
+                    "Use this context to build upon prior knowledge and avoid redundancy.\n"
+                )
+
+            synthesis_prompt = f"""You are a research analyst. Synthesize the following sources into a comprehensive, well-structured Markdown report.
 {memory_context}
 User's topic: {query}
 
@@ -1285,9 +1482,10 @@ Sources:
 
 Instructions:{mode_instructions}{safe_instruction}"""
 
-        report_resp = await asyncio.to_thread(active_llm.invoke, synthesis_prompt)
-        report_content = (report_resp.content or "").strip()
-        budget.track("synthesis", synthesis_prompt, report_content)
+            synthesis_llm = model_router.get_llm("final_synthesis")
+            report_resp = await asyncio.to_thread(synthesis_llm.invoke, synthesis_prompt)
+            report_content = (report_resp.content or "").strip()
+            budget.track("synthesis", synthesis_prompt, report_content)
 
         refs = "\n".join(f"- **[{i+1}]** [{s['title']}]({s['url']})" for i, s in enumerate(scraped))
         report_content += f"\n\n## References\n\n{refs}"

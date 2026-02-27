@@ -23,6 +23,20 @@ export type DebateConfig = {
   max_sentences_per_message: number;
   no_repetition: boolean;
   retrieval_enabled: boolean;
+  evidence_urls: string[];
+};
+
+export type EvidenceCard = {
+  card_id: string;
+  url: string;
+  domain: string;
+  title: string;
+  snippet: string;
+  quote: string;
+  claim: string;
+  confidence: number;
+  perspective: "FOR" | "AGAINST" | "neutral";
+  source_type: string;
 };
 
 export type DebateMessage = {

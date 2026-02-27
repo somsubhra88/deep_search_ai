@@ -1,0 +1,630 @@
+"""
+Debate orchestration engine — deterministic state machine.
+
+Phases:
+  0. Evidence retrieval (optional — when retrieval_enabled=True)
+  1. Main debate (alternating turns A/B)
+  2. Cross-examination (A asks→B answers, B asks→A answers, repeat)
+  3. Artifact generation (summary, judge, argument graph, coverage gaps)
+"""
+
+import asyncio
+import json
+import logging
+import os
+import re
+from collections import defaultdict
+from datetime import datetime, timezone
+from typing import AsyncGenerator, Optional
+
+from app.db import insert_message, update_artifacts, update_session_status
+from app.schemas.evidence import EvidenceCard, EvidenceConfig, get_evidence_config
+
+logger = logging.getLogger(__name__)
+
+
+class DebateOrchestrator:
+    """Runs a full debate session, yielding SSE events."""
+
+    def __init__(
+        self,
+        session_id: str,
+        topic: str,
+        agent_a: dict,
+        agent_b: dict,
+        config: dict,
+        perspective_dial: int,
+        llm,
+        evidence_urls: Optional[list[str]] = None,
+    ):
+        self.session_id = session_id
+        self.topic = topic
+        self.agents = {"A": agent_a, "B": agent_b}
+        self.config = config
+        self.perspective_dial = perspective_dial
+        self.llm = llm
+        self.messages: list[dict] = []
+        self.turn_counter = {"A": 0, "B": 0}
+        self._cancelled = False
+
+        self.evidence_cards: dict[str, list[EvidenceCard]] = {"A": [], "B": []}
+        self._evidence_urls = evidence_urls or []
+        self._evidence_config = get_evidence_config("debate")
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    async def run(self) -> AsyncGenerator[dict, None]:
+        """Yield SSE-shaped dicts for the entire debate lifecycle."""
+        yield _evt("debate.started", {"sessionId": self.session_id})
+
+        try:
+            if self.config.get("retrieval_enabled", False) and self._evidence_urls:
+                async for ev in self._run_evidence_retrieval():
+                    yield ev
+                    if self._cancelled:
+                        break
+
+            if not self._cancelled:
+                async for ev in self._run_main_debate():
+                    yield ev
+                    if self._cancelled:
+                        break
+
+            if not self._cancelled and self.config.get("cross_exam_enabled", True):
+                async for ev in self._run_cross_exam():
+                    yield ev
+                    if self._cancelled:
+                        break
+
+            if not self._cancelled:
+                async for ev in self._generate_artifacts():
+                    yield ev
+
+            status = "cancelled" if self._cancelled else "completed"
+        except Exception as exc:
+            logger.exception("Debate engine error: %s", exc)
+            yield _evt("debate.error", {"sessionId": self.session_id, "error": str(exc)})
+            status = "error"
+
+        update_session_status(self.session_id, status)
+        yield _evt("debate.finished", {"sessionId": self.session_id, "status": status})
+
+    # ------------------------------------------------------------------
+    # Phase 0: Evidence Retrieval
+    # ------------------------------------------------------------------
+
+    async def _run_evidence_retrieval(self) -> AsyncGenerator[dict, None]:
+        """Collect evidence cards for both sides using the evidence pipeline."""
+        from app.evidence.web_evidence_worker import collect_evidence_for_debate
+
+        yield _evt("evidence.started", {
+            "sessionId": self.session_id,
+            "urlCount": len(self._evidence_urls),
+        })
+
+        try:
+            for_cards, against_cards = await asyncio.gather(
+                collect_evidence_for_debate(
+                    query=self.topic,
+                    urls=self._evidence_urls,
+                    llm=self.llm,
+                    perspective="FOR",
+                    config=self._evidence_config,
+                ),
+                collect_evidence_for_debate(
+                    query=self.topic,
+                    urls=self._evidence_urls,
+                    llm=self.llm,
+                    perspective="AGAINST",
+                    config=self._evidence_config,
+                ),
+            )
+
+            self.evidence_cards["A"] = for_cards
+            self.evidence_cards["B"] = against_cards
+
+            yield _evt("evidence.ready", {
+                "sessionId": self.session_id,
+                "forCards": len(for_cards),
+                "againstCards": len(against_cards),
+                "cards": {
+                    "for": [c.model_dump() for c in for_cards],
+                    "against": [c.model_dump() for c in against_cards],
+                },
+            })
+        except Exception as e:
+            logger.warning("Evidence retrieval failed (non-fatal): %s", e)
+            yield _evt("evidence.error", {
+                "sessionId": self.session_id,
+                "error": str(e),
+            })
+
+    # ------------------------------------------------------------------
+    # Phase 1: Main Debate
+    # ------------------------------------------------------------------
+
+    async def _run_main_debate(self) -> AsyncGenerator[dict, None]:
+        turn_count = self.config.get("turn_count", 10)
+        for turn in range(turn_count):
+            if self._cancelled:
+                return
+
+            agent_id = "A" if turn % 2 == 0 else "B"
+            self.turn_counter[agent_id] += 1
+            message_id = f"{agent_id}{self.turn_counter[agent_id]}"
+
+            opponent_id = "B" if agent_id == "A" else "A"
+            opponent_last = self._latest_message_by(opponent_id)
+            reply_to = opponent_last["message_id"] if opponent_last else None
+
+            prompt = self._debate_prompt(agent_id, opponent_last)
+
+            yield _evt("message.started", {
+                "sessionId": self.session_id,
+                "messageId": message_id,
+                "agentId": agent_id,
+                "phase": "debate",
+                "replyToMessageId": reply_to,
+            })
+
+            full_text = ""
+            async for chunk in self._stream_llm(prompt):
+                full_text += chunk
+                yield _evt("message.delta", {"messageId": message_id, "delta": chunk})
+
+            record = self._save_message(
+                message_id=message_id, agent_id=agent_id, phase="debate",
+                text=full_text, reply_to=reply_to,
+            )
+            yield _evt("message.final", {
+                "messageId": message_id, "fullText": full_text,
+                "agentId": agent_id, "phase": "debate",
+                "replyToMessageId": reply_to, "createdAt": record["created_at"],
+            })
+
+    # ------------------------------------------------------------------
+    # Phase 2: Cross-Examination
+    # ------------------------------------------------------------------
+
+    async def _run_cross_exam(self) -> AsyncGenerator[dict, None]:
+        q_per_agent = self.config.get("cross_exam_questions_per_agent", 2)
+
+        for round_num in range(q_per_agent):
+            for questioner, answerer in [("A", "B"), ("B", "A")]:
+                if self._cancelled:
+                    return
+
+                opponent_latest = self._latest_message_by(answerer)
+                challenges_id = opponent_latest["message_id"] if opponent_latest else None
+
+                # --- question ---
+                q_mid = f"{questioner}_XQ{round_num + 1}"
+                q_prompt = self._cross_exam_question_prompt(questioner, opponent_latest)
+
+                yield _evt("message.started", {
+                    "sessionId": self.session_id, "messageId": q_mid,
+                    "agentId": questioner, "phase": "cross_exam_question",
+                    "replyToMessageId": challenges_id,
+                    "challengesMessageId": challenges_id,
+                })
+
+                q_text = ""
+                async for chunk in self._stream_llm(q_prompt):
+                    q_text += chunk
+                    yield _evt("message.delta", {"messageId": q_mid, "delta": chunk})
+
+                q_rec = self._save_message(
+                    message_id=q_mid, agent_id=questioner,
+                    phase="cross_exam_question", text=q_text,
+                    reply_to=challenges_id, challenges=challenges_id,
+                )
+                yield _evt("message.final", {
+                    "messageId": q_mid, "fullText": q_text,
+                    "agentId": questioner, "phase": "cross_exam_question",
+                    "replyToMessageId": challenges_id,
+                    "challengesMessageId": challenges_id,
+                    "createdAt": q_rec["created_at"],
+                })
+
+                # --- answer ---
+                a_mid = f"{answerer}_XA{round_num + 1}"
+                a_prompt = self._cross_exam_answer_prompt(answerer, q_text, q_mid)
+
+                yield _evt("message.started", {
+                    "sessionId": self.session_id, "messageId": a_mid,
+                    "agentId": answerer, "phase": "cross_exam_answer",
+                    "replyToMessageId": q_mid, "answersQuestionId": q_mid,
+                })
+
+                a_text = ""
+                async for chunk in self._stream_llm(a_prompt):
+                    a_text += chunk
+                    yield _evt("message.delta", {"messageId": a_mid, "delta": chunk})
+
+                a_rec = self._save_message(
+                    message_id=a_mid, agent_id=answerer,
+                    phase="cross_exam_answer", text=a_text,
+                    reply_to=q_mid, answers_question=q_mid,
+                )
+                yield _evt("message.final", {
+                    "messageId": a_mid, "fullText": a_text,
+                    "agentId": answerer, "phase": "cross_exam_answer",
+                    "replyToMessageId": q_mid, "answersQuestionId": q_mid,
+                    "createdAt": a_rec["created_at"],
+                })
+
+    # ------------------------------------------------------------------
+    # Phase 3: Artifacts
+    # ------------------------------------------------------------------
+
+    async def _generate_artifacts(self) -> AsyncGenerator[dict, None]:
+        yield _evt("artifacts.generating", {"sessionId": self.session_id, "step": "summary"})
+        summary = await self._gen_summary()
+        update_artifacts(self.session_id, summary=summary)
+
+        yield _evt("artifacts.generating", {"sessionId": self.session_id, "step": "judge"})
+        judge = await self._gen_judge()
+        update_artifacts(self.session_id, judge=judge)
+
+        yield _evt("artifacts.generating", {"sessionId": self.session_id, "step": "argument_graph"})
+        graph = await self._gen_argument_graph()
+        update_artifacts(self.session_id, argument_graph=graph)
+
+        yield _evt("artifacts.generating", {"sessionId": self.session_id, "step": "coverage_gaps"})
+        gaps = self._compute_coverage_gaps(graph)
+        update_artifacts(self.session_id, coverage_gaps=gaps)
+
+        yield _evt("artifacts.ready", {
+            "sessionId": self.session_id,
+            "summary": summary,
+            "judge": judge,
+            "argumentGraph": graph,
+            "coverageGaps": gaps,
+        })
+
+    # ------------------------------------------------------------------
+    # Prompt builders
+    # ------------------------------------------------------------------
+
+    def _format_evidence_cards(self, agent_id: str) -> str:
+        """Format evidence cards for injection into debate prompts."""
+        cards = self.evidence_cards.get(agent_id, [])
+        if not cards:
+            return ""
+
+        lines = ["\nRetrieved Evidence (cite by card_id and quote when using):"]
+        for card in cards[:8]:
+            lines.append(
+                f"  [{card.card_id}] ({card.domain}) "
+                f"Claim: {card.claim[:120]} | "
+                f"Quote: \"{card.quote[:150]}\" | "
+                f"Confidence: {card.confidence:.1f}"
+            )
+        return "\n".join(lines)
+
+    def _debate_prompt(self, agent_id: str, opponent_last: dict | None) -> str:
+        agent = self.agents[agent_id]
+        persona = agent["persona"]
+        stance = agent["stance"]
+        persp = self._perspective_instruction()
+        max_sentences = self.config.get("max_sentences_per_message", 15)
+        no_repeat = self.config.get("no_repetition", True)
+
+        window = self.messages[-6:] if len(self.messages) > 6 else self.messages
+        history = "\n".join(
+            f"[{m['message_id']}] Agent {m['agent_id']} ({self._stance_of(m['agent_id'])}): {m['text']}"
+            for m in window
+        )
+
+        opponent_ctx = ""
+        if opponent_last:
+            excerpt = opponent_last["text"][:500]
+            opponent_ctx = f"Opponent's latest message [{opponent_last['message_id']}]: {excerpt}"
+        else:
+            opponent_ctx = "You are opening the debate. State your position clearly and persuasively."
+
+        evidence_ctx = self._format_evidence_cards(agent_id)
+        evidence_rule = ""
+        if evidence_ctx:
+            evidence_rule = (
+                "- CITE evidence cards by [card_id] when making claims. "
+                "Use direct quotes from evidence to strengthen arguments.\n"
+            )
+
+        return f"""You are Agent {agent_id}, debating the topic: "{self.topic}"
+Your stance: {stance}
+Your persona: {persona.get('profession', 'Analyst')}, attitude: {persona.get('attitude', 'logical')}, style: {persona.get('style', 'formal')}
+Gender: {persona.get('gender', 'neutral')}
+
+{persp}
+{evidence_ctx}
+
+Debate history (recent):
+{history}
+
+{opponent_ctx}
+
+Rules:
+- Directly address your opponent's latest point. Be specific.
+- Stay in character as your persona.
+- Maximum {max_sentences} sentences.
+- {"Do NOT repeat arguments already made." if no_repeat else ""}
+{evidence_rule}- If your attitude is 'data-backed', cite evidence and call out uncertainty.
+- Be persuasive but professional.
+
+Respond as Agent {agent_id} ({stance}):"""
+
+    def _cross_exam_question_prompt(self, questioner: str, opponent_msg: dict | None) -> str:
+        persona = self.agents[questioner]["persona"]
+        excerpt = (opponent_msg["text"][:300] if opponent_msg else "No prior message")
+        mid = opponent_msg["message_id"] if opponent_msg else "N/A"
+
+        return f"""You are Agent {questioner} cross-examining your opponent.
+Your persona: {persona.get('profession', 'Analyst')}, attitude: {persona.get('attitude', 'logical')}
+Topic: "{self.topic}"
+
+The opponent's statement you are challenging [{mid}]:
+"{excerpt}"
+
+Rules:
+- Quote or reference a specific part of the above statement.
+- Ask exactly ONE pointed, direct question.
+- Do NOT ask multi-part questions.
+- Be incisive but professional.
+
+Your cross-examination question:"""
+
+    def _cross_exam_answer_prompt(self, answerer: str, question_text: str, q_mid: str) -> str:
+        persona = self.agents[answerer]["persona"]
+        stance = self.agents[answerer]["stance"]
+
+        return f"""You are Agent {answerer} answering a cross-examination question.
+Your stance: {stance}
+Your persona: {persona.get('profession', 'Analyst')}, attitude: {persona.get('attitude', 'logical')}
+Topic: "{self.topic}"
+
+Question [{q_mid}]:
+"{question_text}"
+
+Rules:
+- Answer the question directly and honestly.
+- Acknowledge any assumptions you made.
+- Explicitly address the specific point raised.
+- Stay in character. Be professional.
+
+Your answer:"""
+
+    # ------------------------------------------------------------------
+    # Artifact generators
+    # ------------------------------------------------------------------
+
+    async def _gen_summary(self) -> dict:
+        transcript = self._format_transcript()
+        prompt = f"""Analyze this debate transcript and produce a neutral summary.
+Topic: "{self.topic}"
+
+Transcript:
+{transcript}
+
+Return ONLY valid JSON (no markdown fences):
+{{
+  "key_points_for": [{{"point": "...", "message_ids": ["A1"]}}],
+  "key_points_against": [{{"point": "...", "message_ids": ["B1"]}}],
+  "strongest_evidence": [{{"evidence": "...", "message_ids": ["A2"]}}],
+  "unresolved_points": ["..."],
+  "neutral_takeaway": "..."
+}}"""
+        return await self._invoke_json(prompt, fallback={
+            "key_points_for": [], "key_points_against": [],
+            "strongest_evidence": [], "unresolved_points": [],
+            "neutral_takeaway": "Summary generation failed.",
+        })
+
+    async def _gen_judge(self) -> dict:
+        transcript = self._format_transcript()
+        prompt = f"""You are a corporate judge evaluating a structured debate.
+Topic: "{self.topic}"
+
+Transcript:
+{transcript}
+
+Evaluate and return ONLY valid JSON (no markdown fences):
+{{
+  "winner": "FOR" or "AGAINST" or "DRAW",
+  "rubric": {{
+    "logic": 0-10,
+    "evidence_quality": 0-10,
+    "relevance": 0-10,
+    "clarity": 0-10,
+    "professional_tone": 0-10,
+    "risk_compliance": 0-10
+  }},
+  "rationales": [{{"point": "...", "message_ids": ["A3","B4"]}}],
+  "executive_recommendation": "...",
+  "risks_and_compliance_notes": "..."
+}}
+
+CRITICAL: Cite specific message IDs in every rationale."""
+        return await self._invoke_json(prompt, fallback={
+            "winner": "DRAW",
+            "rubric": {"logic": 5, "evidence_quality": 5, "relevance": 5, "clarity": 5, "professional_tone": 5, "risk_compliance": 5},
+            "rationales": [], "executive_recommendation": "Evaluation failed.",
+            "risks_and_compliance_notes": "",
+        })
+
+    async def _gen_argument_graph(self) -> dict:
+        transcript = self._format_transcript()
+        prompt = f"""Extract all claims from this debate into a structured argument graph.
+Topic: "{self.topic}"
+
+Transcript:
+{transcript}
+
+Return ONLY valid JSON (no markdown fences):
+{{
+  "claims": [
+    {{"claimId": "C1", "text": "...", "byAgent": "A", "messageIds": ["A2"], "type": "assertion" or "evidence" or "assumption" or "counterclaim"}}
+  ],
+  "relations": [
+    {{"from": "C3", "to": "C1", "rel": "supports" or "refutes" or "clarifies"}}
+  ]
+}}"""
+        graph = await self._invoke_json(prompt, fallback={"claims": [], "relations": []})
+        if not graph.get("claims"):
+            graph = self._heuristic_graph()
+        return graph
+
+    def _compute_coverage_gaps(self, graph: dict) -> list[dict]:
+        claims = {c["claimId"]: c for c in graph.get("claims", [])}
+        relations = graph.get("relations", [])
+
+        supported_by: dict[str, list] = defaultdict(list)
+        refuted_by: dict[str, list] = defaultdict(list)
+        for r in relations:
+            if r.get("rel") == "supports":
+                supported_by[r["to"]].append(r["from"])
+            elif r.get("rel") == "refutes":
+                refuted_by[r["to"]].append(r["from"])
+
+        gaps = []
+
+        for cid, claim in claims.items():
+            if claim.get("type") == "assertion" and not supported_by.get(cid):
+                gaps.append({
+                    "gapId": f"EG-{cid}", "type": "evidence_gap",
+                    "severity": "high",
+                    "relatedClaimIds": [cid],
+                    "relatedMessageIds": claim.get("messageIds", []),
+                    "description": f"Assertion has no supporting evidence: \"{claim['text'][:80]}\"",
+                    "suggestedFollowupPrompt": f"Find evidence for or against: {claim['text'][:100]}",
+                })
+
+            if claim.get("type") in ("assertion", "evidence") and not refuted_by.get(cid):
+                opponent = "B" if claim.get("byAgent") == "A" else "A"
+                gaps.append({
+                    "gapId": f"CG-{cid}", "type": "counter_gap",
+                    "severity": "medium",
+                    "relatedClaimIds": [cid],
+                    "relatedMessageIds": claim.get("messageIds", []),
+                    "description": f"Agent {opponent} never countered: \"{claim['text'][:80]}\"",
+                    "suggestedFollowupPrompt": f"Counter-arguments to: {claim['text'][:100]}",
+                })
+
+            if claim.get("type") == "assumption":
+                gaps.append({
+                    "gapId": f"AG-{cid}", "type": "assumption_gap",
+                    "severity": "medium",
+                    "relatedClaimIds": [cid],
+                    "relatedMessageIds": claim.get("messageIds", []),
+                    "description": f"Assumption not qualified: \"{claim['text'][:80]}\"",
+                    "suggestedFollowupPrompt": f"Examine validity of assumption: {claim['text'][:100]}",
+                })
+
+        return gaps
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _latest_message_by(self, agent_id: str) -> dict | None:
+        for m in reversed(self.messages):
+            if m["agent_id"] == agent_id:
+                return m
+        return None
+
+    def _stance_of(self, agent_id: str) -> str:
+        return self.agents.get(agent_id, {}).get("stance", "?")
+
+    def _perspective_instruction(self) -> str:
+        if self.perspective_dial < 33:
+            return "PERSPECTIVE: Strict Academic — require evidence for claims, avoid speculation, prefer peer-reviewed sources, be cautious."
+        elif self.perspective_dial < 66:
+            return "PERSPECTIVE: Mainstream — balanced and pragmatic approach, use reputable sources, be measured."
+        else:
+            return "PERSPECTIVE: Fringe/Unfiltered — broader speculation allowed but MUST label speculative claims as such. Still no unsafe content."
+
+    def _format_transcript(self) -> str:
+        parts = []
+        for m in self.messages:
+            phase_tag = ""
+            if m["phase"] == "cross_exam_question":
+                phase_tag = " [Cross-Exam Q]"
+            elif m["phase"] == "cross_exam_answer":
+                phase_tag = " [Cross-Exam A]"
+            reply = f" → replying to {m.get('reply_to_message_id', '')}" if m.get("reply_to_message_id") else ""
+            parts.append(f"[{m['message_id']}] Agent {m['agent_id']} ({self._stance_of(m['agent_id'])}){phase_tag}{reply}:\n{m['text']}")
+        return "\n\n".join(parts)
+
+    def _save_message(
+        self, *, message_id: str, agent_id: str, phase: str, text: str,
+        reply_to: str | None = None, challenges: str | None = None,
+        answers_question: str | None = None,
+    ) -> dict:
+        record = {
+            "session_id": self.session_id,
+            "message_id": message_id,
+            "agent_id": agent_id,
+            "phase": phase,
+            "text": text,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "reply_to_message_id": reply_to,
+            "challenges_message_id": challenges,
+            "answers_question_id": answers_question,
+        }
+        self.messages.append(record)
+        insert_message(record)
+        return record
+
+    def _heuristic_graph(self) -> dict:
+        """Fallback: split debate messages into simple claims by sentence."""
+        claims = []
+        for m in self.messages:
+            if m["phase"] not in ("debate", "cross_exam_answer"):
+                continue
+            sentences = [s.strip() for s in re.split(r'[.!?]+', m["text"]) if len(s.strip()) > 20]
+            for i, sent in enumerate(sentences[:3]):
+                cid = f"C-{m['message_id']}-{i}"
+                claims.append({
+                    "claimId": cid,
+                    "text": sent,
+                    "byAgent": m["agent_id"],
+                    "messageIds": [m["message_id"]],
+                    "type": "assertion",
+                })
+        return {"claims": claims, "relations": []}
+
+    async def _stream_llm(self, prompt: str) -> AsyncGenerator[str, None]:
+        """Stream tokens from the LLM, yielding string chunks."""
+        try:
+            async for chunk in self.llm.astream(prompt):
+                if self._cancelled:
+                    return
+                content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if content:
+                    yield content
+        except Exception as exc:
+            logger.error("LLM streaming error: %s", exc)
+            yield f"\n[Error generating response: {exc}]"
+
+    async def _invoke_json(self, prompt: str, fallback: dict) -> dict:
+        """Invoke LLM and parse JSON from its response, with retry + fallback."""
+        for attempt in range(2):
+            try:
+                resp = await asyncio.to_thread(self.llm.invoke, prompt)
+                raw = resp.content if hasattr(resp, "content") else str(resp)
+                raw = raw.strip()
+                raw = re.sub(r'^```(?:json)?\s*', '', raw)
+                raw = re.sub(r'\s*```$', '', raw)
+                match = re.search(r'\{[\s\S]*\}', raw)
+                if match:
+                    return json.loads(match.group())
+            except Exception as exc:
+                logger.warning("JSON invoke attempt %d failed: %s", attempt + 1, exc)
+                if attempt == 0:
+                    prompt += "\n\nIMPORTANT: Return ONLY valid JSON, no markdown or explanation."
+        return fallback
+
+
+def _evt(event: str, data: dict) -> dict:
+    return {"event": event, "data": data}
