@@ -17,6 +17,9 @@ wheels/
 # Local memory data (privacy-sensitive)
 chroma_data/memory_store.json
 
+# Debate session database
+data/
+
 # Generated distributable artifacts
 dist/
 
