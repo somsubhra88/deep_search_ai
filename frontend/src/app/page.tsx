@@ -36,6 +36,8 @@ import {
 import ReactMarkdown from "react-markdown";
 import { Toaster, toast } from "sonner";
 import MemoryGraphWidget from "@/components/memory/MemoryGraphWidget";
+import DebateMode from "@/components/debate/DebateMode";
+import ModeCustomization, { DEFAULT_MODE_SETTINGS, type ModeSettings } from "@/components/ModeCustomization";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -135,7 +137,7 @@ type SearchMode =
   | "fact_check"
   | "deep_dive"
   | "social_media";
-type ModelId = "openai" | "qwen" | "ollama";
+type ModelId = "openai" | "anthropic" | "grok" | "mistral" | "gemini" | "deepseek" | "qwen" | "ollama";
 type SearchProvider = "serpapi" | "tavily";
 
 // ---------------------------------------------------------------------------
@@ -172,19 +174,49 @@ const MODEL_PROVIDER_META: Record<
 > = {
   openai: {
     label: "OpenAI",
-    description: "Hosted frontier models",
+    description: "GPT-4o, GPT-4.1, o3/o4 reasoning models",
     color: "from-emerald-500 to-teal-500",
     keyLabel: "OPENAI_API_KEY",
   },
+  anthropic: {
+    label: "Anthropic (Claude)",
+    description: "Claude 4, Sonnet, Haiku models",
+    color: "from-orange-500 to-amber-500",
+    keyLabel: "ANTHROPIC_API_KEY",
+  },
+  grok: {
+    label: "xAI (Grok)",
+    description: "Grok-3, Grok-3 Mini from xAI",
+    color: "from-sky-500 to-blue-600",
+    keyLabel: "GROK_API_KEY",
+  },
+  mistral: {
+    label: "Mistral AI",
+    description: "Mistral Large, Medium, Codestral",
+    color: "from-rose-500 to-pink-500",
+    keyLabel: "MISTRAL_API_KEY",
+  },
+  gemini: {
+    label: "Google (Gemini)",
+    description: "Gemini 2.5 Pro, Flash models",
+    color: "from-blue-500 to-indigo-500",
+    keyLabel: "GEMINI_API_KEY",
+  },
+  deepseek: {
+    label: "DeepSeek",
+    description: "DeepSeek-V3, R1 reasoning model",
+    color: "from-cyan-500 to-teal-600",
+    keyLabel: "DEEPSEEK_API_KEY",
+  },
   qwen: {
     label: "Qwen (DashScope)",
-    description: "Alibaba hosted models",
-    color: "from-blue-500 to-violet-500",
+    description: "Alibaba Qwen-Max, Qwen3 models",
+    color: "from-violet-500 to-purple-500",
     keyLabel: "QWEN_API_KEY",
   },
   ollama: {
     label: "Ollama (Local)",
-    description: "Local model runtime",
+    description: "Run open-source models locally",
     color: "from-slate-500 to-zinc-600",
     keyLabel: "No API key required",
   },
@@ -192,16 +224,46 @@ const MODEL_PROVIDER_META: Record<
 
 const MODEL_CATALOG: Record<ModelId, string[]> = {
   openai: [
-    "gpt-5",
-    "gpt-5-mini",
-    "gpt-5-nano",
-    "gpt-4.1",
-    "gpt-4.1-mini",
     "gpt-4o",
     "gpt-4o-mini",
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
     "o4-mini",
     "o3",
     "o3-mini",
+  ],
+  anthropic: [
+    "claude-sonnet-4-20250514",
+    "claude-3-7-sonnet-20250219",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-5-haiku-20241022",
+    "claude-3-opus-20240229",
+  ],
+  grok: [
+    "grok-3",
+    "grok-3-fast",
+    "grok-3-mini",
+    "grok-3-mini-fast",
+    "grok-2",
+  ],
+  mistral: [
+    "mistral-large-latest",
+    "mistral-medium-latest",
+    "mistral-small-latest",
+    "codestral-latest",
+    "pixtral-large-latest",
+    "mistral-saba-latest",
+  ],
+  gemini: [
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+  ],
+  deepseek: [
+    "deepseek-chat",
+    "deepseek-reasoner",
   ],
   qwen: [
     "qwen-max",
@@ -689,6 +751,7 @@ export default function Home() {
   const [useSnippetsOnly, setUseSnippetsOnly] = useState(false);
   const [safeSearch, setSafeSearch] = useState(true);
   const [selectedModes, setSelectedModes] = useState<Set<SearchMode>>(new Set(["standard"]));
+  const [modeSettings, setModeSettings] = useState<ModeSettings>(DEFAULT_MODE_SETTINGS);
   const [modelId, setModelId] = useState<ModelId>("openai");
   const [modelName, setModelName] = useState<string>(MODEL_CATALOG.openai[0]);
   const [searchProvider, setSearchProvider] = useState<SearchProvider>("serpapi");
@@ -893,6 +956,7 @@ export default function Home() {
             modes: actualModes,
             model_id: modelId,
             model_name: modelName,
+            mode_settings: modeSettings,
           }),
           signal: controller.signal,
         }
@@ -970,7 +1034,7 @@ export default function Home() {
       setIsResearching(false);
       abortRef.current = null;
     }
-  }, [query, useSnippetsOnly, safeSearch, selectedModes, modelId, modelName, addToHistory, saveSession, setup]);
+  }, [query, useSnippetsOnly, safeSearch, selectedModes, modelId, modelName, modeSettings, addToHistory, saveSession, setup]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1029,6 +1093,7 @@ export default function Home() {
   const followupQuestions = useMemo(() => metadata?.followup_questions, [metadata]);
 
   const isDebateSwarm = isResearching && selectedModes.has("debate");
+  const isDebateOnlyMode = selectedModes.has("debate") && selectedModes.size === 1;
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", isDark);
@@ -1334,7 +1399,7 @@ export default function Home() {
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && runResearch()}
                 onFocus={() => setShowHistory(true)}
-                placeholder="Topic, @username, #hashtag..."
+                placeholder={isDebateOnlyMode ? "Enter debate topic..." : "Topic, @username, #hashtag..."}
                 className="w-full bg-transparent text-lg outline-none placeholder:text-slate-500"
                 disabled={isResearching}
                 aria-label="Search query"
@@ -1510,6 +1575,15 @@ export default function Home() {
             </div>
           </div>
 
+          {/* Mode-Specific Customization */}
+          <ModeCustomization
+            selectedModes={selectedModes}
+            settings={modeSettings}
+            onChange={setModeSettings}
+            isDark={isDark}
+            disabled={isResearching}
+          />
+
           {/* Toggle Options */}
           <div className="flex flex-wrap gap-6 border-t border-slate-700/30 px-6 py-3 dark:border-slate-700/30">
             <label className="flex cursor-pointer items-center gap-2">
@@ -1525,6 +1599,19 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Debate Mode — persona-based two-agent chat */}
+        {isDebateOnlyMode && (
+          <div className="mb-12">
+            <DebateMode
+              topic={query}
+              perspectiveDial={perspectiveBias}
+              modelId={modelId}
+              modelName={modelName}
+              isDark={isDark}
+            />
+          </div>
+        )}
+
         {/* Memory Graph Widget */}
         {showMemoryGraph && (
           <MemoryGraphWidget
@@ -1537,8 +1624,8 @@ export default function Home() {
           />
         )}
 
-        {/* Swarm Visualizer — Debate mode hero loading */}
-        {isDebateSwarm && <SwarmVisualizer isDark={isDark} />}
+        {/* Swarm Visualizer — Debate mode hero loading (only for multi-mode with debate) */}
+        {isDebateSwarm && !isDebateOnlyMode && <SwarmVisualizer isDark={isDark} />}
 
         {/* Progress Log */}
         {isResearching && progressLog.length > 0 && !isDebateSwarm && (
