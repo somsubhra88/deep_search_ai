@@ -11,6 +11,7 @@ import re
 import time
 from collections import defaultdict
 from typing import Literal, Optional
+import httpx
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
@@ -39,7 +40,7 @@ def _resolve_env_path() -> pathlib.Path:
 _ENV_PATH = _resolve_env_path()
 load_dotenv(dotenv_path=_ENV_PATH)
 
-from app.agent import run_research_agent, clear_llm_cache, _get_llm
+from app.agent import run_research_agent, clear_llm_cache, _get_llm, MODEL_REGISTRY
 from app.memory_graph import recall_past_context
 from app.db import init_db, new_session_id, create_session, get_session, update_session_status
 from app.debate_engine import DebateOrchestrator
@@ -56,6 +57,7 @@ from app.kb_schemas import (
     KBCreateRequest, KBResponse, DocumentResponse, DocStatusItem,
     UploadResponse, RAGQueryRequest, RAGResponse,
 )
+from app.models.inception_client import InceptionLLMClient, InceptionConfig, ChatMessage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -172,7 +174,7 @@ VALID_MODES = {
     "social_media",
     "rag",
 }
-VALID_MODELS = {"openai", "anthropic", "grok", "mistral", "gemini", "deepseek", "qwen", "ollama"}
+VALID_MODELS = {"openai", "anthropic", "grok", "mistral", "gemini", "deepseek", "qwen", "ollama", "inception"}
 VALID_SEARCH_PROVIDERS = {"serpapi", "tavily"}
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() in {"1", "true", "yes"}
 _TRUSTED_PROXY_IPS = {
@@ -344,6 +346,59 @@ async def health():
     return {"status": "ok", "version": "0.2.0"}
 
 
+@app.get("/api/providers")
+async def list_providers():
+    providers = []
+    for pid, cfg in MODEL_REGISTRY.items():
+        configured = bool(cfg.get("api_key_env") and os.getenv(cfg["api_key_env"]))
+        providers.append(
+            {
+                "provider": pid,
+                "label": cfg.get("label", pid),
+                "models": [cfg.get("model")] if cfg.get("model") else [],
+                "supports_streaming": False if pid == "inception" else True,
+                "description": "Inception Labs mercury-2" if pid == "inception" else cfg.get("label", pid),
+                "configured": configured,
+            }
+        )
+    return providers
+
+
+@app.post("/api/providers/inception/test")
+async def test_inception_provider():
+    api_key = os.getenv("INCEPTION_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="INCEPTION_API_KEY is not set on the backend.")
+
+    base_url = os.getenv("INCEPTION_BASE_URL", "https://api.inceptionlabs.ai/v1")
+    model_name = os.getenv("INCEPTION_MODEL", "mercury-2")
+
+    try:
+        config = InceptionConfig(provider="inception", api_key=api_key, base_url=base_url)
+    except Exception as e:  # pydantic validation errors
+        raise HTTPException(status_code=400, detail=f"Invalid Inception configuration: {e}")
+
+    client = InceptionLLMClient(config)
+    try:
+        result = await client.chat_completion(
+            [ChatMessage(role="user", content="Ping from Deep Search AI agent. Reply with 'pong'.")],
+            model=model_name or "mercury-2",
+        )
+    except httpx.HTTPStatusError as e:
+        detail = e.response.text if e.response else str(e)
+        raise HTTPException(status_code=e.response.status_code if e.response else 502, detail=f"Inception API error: {detail}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Inception request failed: {e}")
+
+    preview = (result.content or "").strip()[:200]
+    return {
+        "status": "ok",
+        "model": result.model,
+        "configured": True,
+        "preview": preview,
+    }
+
+
 @app.post("/api/setup")
 async def setup_runtime_config(body: SetupRequest):
     env_updates: dict[str, str] = {
@@ -364,6 +419,7 @@ async def setup_runtime_config(body: SetupRequest):
         "gemini":    {"model_env": "GEMINI_MODEL",     "key_env": "GEMINI_API_KEY"},
         "deepseek":  {"model_env": "DEEPSEEK_MODEL",   "key_env": "DEEPSEEK_API_KEY"},
         "qwen":      {"model_env": "QWEN_MODEL",       "key_env": "QWEN_API_KEY"},
+        "inception": {"model_env": "INCEPTION_MODEL",  "key_env": "INCEPTION_API_KEY"},
     }
 
     if body.llm_provider == "ollama":
