@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Any
 
-import httpx
 from pydantic import BaseModel, HttpUrl, SecretStr
+from openai import AsyncOpenAI
 
 
 class ChatMessage(BaseModel):
@@ -25,15 +25,32 @@ class InceptionConfig(BaseModel):
 
 
 class InceptionLLMClient:
-    """Minimal client for Inception Labs mercury-2."""
+    """Minimal client for Inception Labs mercury-2 (OpenAI-compatible SDK)."""
 
-    def __init__(self, config: InceptionConfig, client: Optional[httpx.AsyncClient] = None):
+    def __init__(self, config: InceptionConfig, client: Optional[AsyncOpenAI] = None):
         self.config = config
-        self._client = client
+        # Inception exposes an OpenAI-compatible API; use OpenAI SDK with base_url override.
+        self._client = client or AsyncOpenAI(
+            api_key=self.config.api_key.get_secret_value(),
+            base_url=str(self.config.base_url),
+            timeout=self.config.timeout_seconds,
+        )
 
     @staticmethod
     def _serialize_messages(messages: list[ChatMessage]) -> list[dict]:
         return [{"role": m.role, "content": m.content} for m in messages]
+
+    @staticmethod
+    def _to_raw_dict(obj: Any) -> dict:
+        # Newer OpenAI SDK responses support `model_dump()` (pydantic v2).
+        if hasattr(obj, "model_dump"):
+            return obj.model_dump()
+        # Fallbacks for older SDK shapes.
+        if hasattr(obj, "to_dict_recursive"):
+            return obj.to_dict_recursive()
+        if hasattr(obj, "dict"):
+            return obj.dict()
+        return {"response": str(obj)}
 
     async def chat_completion(
         self,
@@ -51,31 +68,20 @@ class InceptionLLMClient:
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
 
-        headers = {
-            "Authorization": f"Bearer {self.config.api_key.get_secret_value()}",
-            "Content-Type": "application/json",
-        }
+        resp = await self._client.chat.completions.create(**payload)
 
-        client = self._client or httpx.AsyncClient(timeout=self.config.timeout_seconds)
-        close_client = self._client is None
-        try:
-            resp = await client.post(
-                f"{self.config.base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            choices = data.get("choices") or []
-            content = ""
-            if choices:
-                message = choices[0].get("message") or {}
-                content = message.get("content") or ""
-            return ChatCompletionResult(
-                content=content,
-                model=data.get("model", model),
-                raw=data,
-            )
-        finally:
-            if close_client:
-                await client.aclose()
+        content = ""
+        if getattr(resp, "choices", None):
+            msg = getattr(resp.choices[0], "message", None)
+            if msg is not None:
+                content = getattr(msg, "content", "") or ""
+
+        raw = self._to_raw_dict(resp)
+        # The response may or may not echo the model name; keep a safe default.
+        resolved_model = raw.get("model", model) if isinstance(raw, dict) else model
+
+        return ChatCompletionResult(
+            content=content,
+            model=resolved_model,
+            raw=raw if isinstance(raw, dict) else {"raw": raw},
+        )
