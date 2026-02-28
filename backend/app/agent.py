@@ -110,6 +110,13 @@ MODEL_REGISTRY = {
         "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "client_class": "ChatOpenAI",
     },
+    "inception": {
+        "label": "Inception Labs",
+        "model": os.getenv("INCEPTION_MODEL", "mercury-2"),
+        "api_key_env": "INCEPTION_API_KEY",
+        "base_url": "https://api.inceptionlabs.ai/v1",
+        "client_class": "ChatOpenAI",
+    },
     "ollama": {
         "label": "Ollama Local",
         "model": os.getenv("OLLAMA_MODEL", "llama3.2"),
@@ -1389,11 +1396,17 @@ async def run_research_agent(
         ev_config = get_evidence_config(primary_mode)
         ephemeral_store = None
         reranker = BM25Reranker() if ev_config.use_reranking else None
+        cascade_cfg = ModelCascadeConfig()
+        if os.getenv("INCEPTION_API_KEY"):
+            cascade_cfg.medium_model_id = "inception"
+            cascade_cfg.medium_model_name = os.getenv("INCEPTION_MODEL", "mercury-2")
+
         model_router = ModelRouter(
             main_llm=active_llm,
             main_model_id=model_id,
             main_model_name=model_name or "",
             get_llm_fn=_get_llm,
+            cascade_config=cascade_cfg,
         )
 
         if ev_config.use_ephemeral_rag:

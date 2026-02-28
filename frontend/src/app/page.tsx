@@ -140,7 +140,7 @@ type SearchMode =
   | "deep_dive"
   | "social_media"
   | "rag";
-type ModelId = "openai" | "anthropic" | "grok" | "mistral" | "gemini" | "deepseek" | "qwen" | "ollama";
+type ModelId = "openai" | "anthropic" | "grok" | "mistral" | "gemini" | "deepseek" | "qwen" | "ollama" | "inception";
 type SearchProvider = "serpapi" | "tavily";
 
 // ---------------------------------------------------------------------------
@@ -217,6 +217,12 @@ const MODEL_PROVIDER_META: Record<
     color: "from-violet-500 to-purple-500",
     keyLabel: "QWEN_API_KEY",
   },
+  inception: {
+    label: "Inception Labs",
+    description: "mercury-2 fast reasoning model",
+    color: "from-emerald-500 to-cyan-500",
+    keyLabel: "INCEPTION_API_KEY",
+  },
   ollama: {
     label: "Ollama (Local)",
     description: "Run open-source models locally",
@@ -280,6 +286,7 @@ const MODEL_CATALOG: Record<ModelId, string[]> = {
     "qwen2.5-14b-instruct",
     "qwen2.5-7b-instruct",
   ],
+  inception: ["mercury-2"],
   ollama: [
     "llama3.2",
     "llama3.1:8b",
@@ -778,6 +785,7 @@ export default function Home() {
   const [dataIntegrity, setDataIntegrity] = useState<"idle" | "checking" | "green" | "yellow" | "red">("idle");
   const [showMemoryGraph, setShowMemoryGraph] = useState(false);
   const [showSetupModal, setShowSetupModal] = useState(false);
+  const [configuredProviders, setConfiguredProviders] = useState<Partial<Record<ModelId, boolean>>>({});
   const [setupStep, setSetupStep] = useState<1 | 2>(1);
   const [isSavingSetup, setIsSavingSetup] = useState(false);
   const [setup, setSetup] = useState<UserSetup>({
@@ -823,6 +831,21 @@ export default function Home() {
     } else {
       setShowSetupModal(true);
     }
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/providers")
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: Array<{ provider?: string; configured?: boolean }>) => {
+        const map: Partial<Record<ModelId, boolean>> = {};
+        data?.forEach((p) => {
+          if (p?.provider) map[p.provider as ModelId] = !!p.configured;
+        });
+        setConfiguredProviders(map);
+      })
+      .catch(() => {
+        // non-fatal
+      });
   }, []);
 
   const addToHistory = useCallback((q: string) => {
@@ -871,7 +894,12 @@ export default function Home() {
   }, []);
 
   const submitSetup = useCallback(async () => {
-    if (setup.llm_provider !== "ollama" && !setup.llm_api_key.trim()) {
+    const providerConfigured = configuredProviders[setup.llm_provider];
+    if (setup.llm_provider !== "ollama" && setup.llm_provider !== "inception" && !setup.llm_api_key.trim()) {
+      toast.error("Please enter your model API key");
+      return;
+    }
+    if (setup.llm_provider === "inception" && !providerConfigured && !setup.llm_api_key.trim()) {
       toast.error("Please enter your model API key");
       return;
     }
@@ -882,10 +910,11 @@ export default function Home() {
 
     setIsSavingSetup(true);
     try {
+      const trimmedKey = setup.llm_api_key.trim();
       const payload = {
         llm_provider: setup.llm_provider,
         llm_model: setup.llm_model.trim(),
-        llm_api_key: setup.llm_provider === "ollama" ? null : setup.llm_api_key.trim(),
+        llm_api_key: setup.llm_provider === "ollama" ? null : trimmedKey,
         ollama_base_url: setup.llm_provider === "ollama" ? setup.ollama_base_url.trim() : null,
         search_provider: setup.search_provider,
         search_api_key: setup.search_api_key.trim(),
@@ -901,8 +930,13 @@ export default function Home() {
         throw new Error((body?.error as string) || `HTTP ${res.status}`);
       }
 
-      const nextSetup: UserSetup = { ...setup, llm_model: payload.llm_model };
+      const nextSetup: UserSetup = {
+        ...setup,
+        llm_model: payload.llm_model,
+        llm_api_key: setup.llm_provider === "inception" ? "" : trimmedKey,
+      };
       compressAndStore(SETUP_KEY, nextSetup);
+      setConfiguredProviders((prev) => ({ ...prev, [setup.llm_provider]: true }));
       setModelId(nextSetup.llm_provider);
       setModelName(nextSetup.llm_model);
       setSearchProvider(nextSetup.search_provider);
@@ -914,7 +948,7 @@ export default function Home() {
     } finally {
       setIsSavingSetup(false);
     }
-  }, [setup]);
+  }, [setup, configuredProviders]);
 
   const cancelResearch = useCallback(() => {
     abortRef.current?.abort();
@@ -926,10 +960,14 @@ export default function Home() {
   const runResearch = useCallback(async (overrideQuery?: string) => {
     const q = (overrideQuery || query).trim();
     if (!q) return;
-    const hasSetup =
+    const providerConfigured = configuredProviders[setup.llm_provider];
+    const hasLLMKey =
       setup.llm_provider === "ollama"
-        ? !!setup.search_api_key.trim()
-        : !!setup.llm_api_key.trim() && !!setup.search_api_key.trim();
+        ? true
+        : setup.llm_provider === "inception"
+          ? providerConfigured || !!setup.llm_api_key.trim()
+          : !!setup.llm_api_key.trim();
+    const hasSetup = hasLLMKey && !!setup.search_api_key.trim();
     if (!hasSetup) {
       setShowSetupModal(true);
       toast.info("Complete setup first to run research");
@@ -1045,7 +1083,7 @@ export default function Home() {
       setIsResearching(false);
       abortRef.current = null;
     }
-  }, [query, useSnippetsOnly, safeSearch, selectedModes, modelId, modelName, modeSettings, addToHistory, saveSession, setup]);
+  }, [query, useSnippetsOnly, safeSearch, selectedModes, modelId, modelName, modeSettings, addToHistory, saveSession, setup, configuredProviders]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1216,6 +1254,11 @@ export default function Home() {
                       placeholder="Paste API key"
                       className="w-full rounded-xl border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm text-slate-200"
                     />
+                    {setup.llm_provider === "inception" && (
+                      <p className="mt-1 text-xs text-slate-500">
+                        Get your API key from https://inceptionlabs.ai
+                      </p>
+                    )}
                   </label>
                 ) : (
                   <label className="block">
