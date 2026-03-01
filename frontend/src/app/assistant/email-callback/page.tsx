@@ -6,16 +6,20 @@ import { Loader2, CheckCircle2, XCircle } from "lucide-react";
 import { compressAndStore } from "@/lib/storage";
 
 const GMAIL_TOKENS_KEY = "deep-search-gmail-tokens";
+const GCAL_TOKENS_KEY = "deep-search-gcal-tokens";
 
 function CallbackHandler() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<"exchanging" | "success" | "error">("exchanging");
   const [errorMsg, setErrorMsg] = useState("");
+  const [service, setService] = useState("email");
 
   useEffect(() => {
     const code = searchParams.get("code");
     const error = searchParams.get("error");
+    const state = searchParams.get("state") || "email";
+    setService(state);
 
     if (error) {
       setStatus("error");
@@ -43,11 +47,20 @@ function CallbackHandler() {
         }
 
         const tokens = await res.json();
-        compressAndStore(GMAIL_TOKENS_KEY, {
+        const tokenData = {
           access_token: tokens.access_token,
           refresh_token: tokens.refresh_token,
           expires_at: Date.now() + (tokens.expires_in || 3600) * 1000,
-        });
+        };
+
+        if (state === "calendar") {
+          compressAndStore(GCAL_TOKENS_KEY, tokenData);
+        } else if (state === "all") {
+          compressAndStore(GMAIL_TOKENS_KEY, tokenData);
+          compressAndStore(GCAL_TOKENS_KEY, tokenData);
+        } else {
+          compressAndStore(GMAIL_TOKENS_KEY, tokenData);
+        }
 
         setStatus("success");
         setTimeout(() => router.push("/assistant"), 1500);
@@ -70,7 +83,7 @@ function CallbackHandler() {
       {status === "success" && (
         <>
           <CheckCircle2 className="mx-auto mb-4 h-10 w-10 text-emerald-400" />
-          <h2 className="text-lg font-bold">Gmail Connected!</h2>
+          <h2 className="text-lg font-bold">{service === "calendar" ? "Google Calendar" : service === "all" ? "Google Services" : "Gmail"} Connected!</h2>
           <p className="mt-2 text-sm text-slate-400">Redirecting to assistant...</p>
         </>
       )}

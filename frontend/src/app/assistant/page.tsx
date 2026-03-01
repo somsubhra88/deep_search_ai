@@ -37,8 +37,15 @@ import {
 import ClearHistoryModal from "@/components/ClearHistoryModal";
 
 const GMAIL_TOKENS_KEY = "deep-search-gmail-tokens";
+const GCAL_TOKENS_KEY = "deep-search-gcal-tokens";
 
 type GmailTokens = {
+  access_token: string;
+  refresh_token?: string;
+  expires_at: number;
+};
+
+type GCalTokens = {
   access_token: string;
   refresh_token?: string;
   expires_at: number;
@@ -151,7 +158,7 @@ const SKILL_DEFINITIONS: Record<SkillId, Omit<SkillConfig, "connected" | "provid
   calendar: {
     id: "calendar",
     label: "Calendar",
-    description: "View agenda, schedule events & set reminders",
+    description: "Google Calendar — schedule events & view agenda",
     icon: <CalendarDays className="h-5 w-5" />,
     color: "text-amber-400",
     gradient: "from-amber-500 to-orange-500",
@@ -321,6 +328,7 @@ export default function AssistantPage() {
   const [skillPanelOpen, setSkillPanelOpen] = useState(true);
   const [showConnectModal, setShowConnectModal] = useState<SkillId | null>(null);
   const [gmailTokens, setGmailTokens] = useState<GmailTokens | null>(null);
+  const [gcalTokens, setGcalTokens] = useState<GCalTokens | null>(null);
   const [emailLoading, setEmailLoading] = useState(false);
   const [actionsLoading, setActionsLoading] = useState(false);
   const [pendingApproval, setPendingApproval] = useState<{
@@ -353,6 +361,10 @@ export default function AssistantPage() {
     const storedTokens = loadFromStorage<GmailTokens | null>(GMAIL_TOKENS_KEY, null);
     if (storedTokens?.access_token) {
       setGmailTokens(storedTokens);
+    }
+    const storedGcalTokens = loadFromStorage<GCalTokens | null>(GCAL_TOKENS_KEY, null);
+    if (storedGcalTokens?.access_token) {
+      setGcalTokens(storedGcalTokens);
     }
   }, []);
 
@@ -527,6 +539,10 @@ export default function AssistantPage() {
     setScannedFiles([]);
     setScannedFolderName("");
     setMessages([]);
+    setGmailTokens(null);
+    setGcalTokens(null);
+    try { localStorage.removeItem(GMAIL_TOKENS_KEY); } catch { /* ok */ }
+    try { localStorage.removeItem(GCAL_TOKENS_KEY); } catch { /* ok */ }
     setShowClearModal(false);
     toast.success("All data cleared");
   }, [persistTasks, persistEvents]);
@@ -590,13 +606,74 @@ export default function AssistantPage() {
     }
   }, []);
 
+  // --- Google Calendar API caller ---
+  const callCalendarApi = useCallback(async (action: string, eventData?: { title: string; date: string; time?: string; duration?: number; description?: string }, query?: string) => {
+    if (!gcalTokens?.access_token) throw new Error("Google Calendar not connected. Please connect Google Calendar first.");
+    const res = await fetch("/api/assistant/calendar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action,
+        access_token: gcalTokens.access_token,
+        refresh_token: gcalTokens.refresh_token,
+        event_data: eventData,
+        query,
+      }),
+    });
+    const data = await res.json();
+    if (data.new_token) {
+      const updated = { ...gcalTokens, access_token: data.new_token };
+      setGcalTokens(updated);
+      compressAndStore(GCAL_TOKENS_KEY, updated);
+    }
+    if (!res.ok) throw new Error(data.error || `API error ${res.status}`);
+    return data;
+  }, [gcalTokens]);
+
+  const startCalendarOAuth = useCallback(async () => {
+    setShowConnectModal(null);
+    setActiveSkill("calendar");
+
+    try {
+      const res = await fetch("/api/assistant/email/auth?service=calendar");
+      const data = await res.json();
+
+      if (data.error) {
+        const setupSteps = Array.isArray(data.setup) ? (data.setup as string[]) : [];
+        const guide = setupSteps.length > 0
+          ? setupSteps.join("\n")
+          : "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in your .env file, then restart.";
+
+        const setupMsg: ChatMessage = {
+          id: genId(), role: "assistant",
+          content: `**Google Calendar Setup Required**\n\nTo connect Google Calendar, you need to configure Google OAuth credentials:\n\n${guide}\n\nThis is a one-time setup. Once done, click **"Connect Calendar"** in the sidebar to sign in.`,
+          timestamp: Date.now(), skill: "calendar",
+        };
+        setMessages((prev) => [...prev, setupMsg]);
+        return;
+      }
+
+      if (data.url) {
+        window.location.href = data.url;
+      }
+    } catch {
+      const errorMsg: ChatMessage = {
+        id: genId(), role: "assistant",
+        content: `**Could not reach the calendar auth endpoint.**\n\nMake sure the dev server is running and try again.`,
+        timestamp: Date.now(), skill: "calendar",
+      };
+      setMessages((prev) => [...prev, errorMsg]);
+    }
+  }, []);
+
   // --- Skill connections ---
   const isConnected = useCallback((id: SkillId): boolean => {
     if (id === "actions") return executorAvailable === true;
-    if (id === "tasks" || id === "research" || id === "files" || id === "calendar") return true;
+    if (id === "tasks" || id === "research" || id === "files") return true;
+    if (id === "calendar") return !!gcalTokens?.access_token;
     if (id === "email") return !!gmailTokens?.access_token;
     return !!skillConnections[id as keyof SkillConnectionState]?.connected;
-  }, [skillConnections, gmailTokens, executorAvailable]);
+  }, [skillConnections, gmailTokens, gcalTokens, executorAvailable]);
 
   const connectSkill = useCallback((id: SkillId, provider: string) => {
     const next: SkillConnectionState = { ...skillConnections, [id]: { connected: true, provider } };
@@ -610,6 +687,10 @@ export default function AssistantPage() {
     if (id === "email") {
       setGmailTokens(null);
       try { localStorage.removeItem(GMAIL_TOKENS_KEY); } catch { /* ok */ }
+    }
+    if (id === "calendar") {
+      setGcalTokens(null);
+      try { localStorage.removeItem(GCAL_TOKENS_KEY); } catch { /* ok */ }
     }
     const next: SkillConnectionState = { ...skillConnections };
     delete next[id];
@@ -771,25 +852,67 @@ export default function AssistantPage() {
 
       // ---- CALENDAR ----
       if (activeSkill === "calendar") {
+        const gcalConnected = !!gcalTokens?.access_token;
+
         const isAddEvent = lower.startsWith("add event") || lower.startsWith("add an event") || lower.startsWith("schedule ") || lower.startsWith("create event") || lower.startsWith("create an event") || lower.startsWith("new event") || /^add\s+.+\s+(?:to|on|in)\s+(?:my\s+)?calendar/i.test(lower);
         if (isAddEvent) {
           const cleaned = text.replace(/^(?:add|create|new|schedule)\s*(?:an?\s+)?event:?\s*/i, "").replace(/\s*(?:to|on|in)\s+(?:my\s+)?calendar\s*/i, " ").trim();
           const parsed = parseEventInput("add event: " + cleaned);
           if (parsed && parsed.title) {
+            if (gcalConnected) {
+              try {
+                const data = await callCalendarApi("create_event", {
+                  title: parsed.title,
+                  date: parsed.date || todayStr(),
+                  time: parsed.time,
+                  duration: 60,
+                });
+                const ev = data.event;
+                const linkStr = ev.link ? `\n\n[Open in Google Calendar](${ev.link})` : "";
+                return `Event added to **Google Calendar**: **"${ev.title}"** on ${ev.date} at ${ev.time}${linkStr}\n\nSay **"Today's agenda"** to see all your events.`;
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : "Calendar API error";
+                if (msg.includes("expired") || msg.includes("reconnect")) {
+                  setGcalTokens(null);
+                  try { localStorage.removeItem(GCAL_TOKENS_KEY); } catch { /* ok */ }
+                  return `**Google Calendar session expired.** Please click **"Connect Calendar"** to reconnect.`;
+                }
+                return `**Error adding to Google Calendar:** ${msg}`;
+              }
+            }
             const ev = addEvent(parsed);
             if (ev) {
               const timeStr = ev.time ? ` at ${ev.time}` : "";
-              return `Event added: **"${ev.title}"** on ${ev.date}${timeStr}\n\nSay **"Today's agenda"** to see all your events.`;
+              return `Event added locally: **"${ev.title}"** on ${ev.date}${timeStr}\n\n*Connect Google Calendar to sync events to your real calendar.*\n\nSay **"Today's agenda"** to see all your events.`;
             }
           }
           return "Please provide event details, e.g. **\"Add event: Team standup tomorrow at 10am\"**";
         }
 
         if (lower.includes("today") && (lower.includes("agenda") || lower.includes("schedule") || lower.includes("show"))) {
+          if (gcalConnected) {
+            try {
+              const data = await callCalendarApi("list_today");
+              if (!data.events || data.events.length === 0) return `**${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}**\n\nNo events scheduled for today on Google Calendar. Looks like a free day!\n\nSay **"Add event: ..."** to schedule something.`;
+              let r = `**Today — ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}** (Google Calendar)\n\n`;
+              data.events.forEach((e: { time: string; title: string }) => {
+                r += `- **${e.time}** — ${e.title}\n`;
+              });
+              return r;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : "Calendar API error";
+              if (msg.includes("expired") || msg.includes("reconnect")) {
+                setGcalTokens(null);
+                try { localStorage.removeItem(GCAL_TOKENS_KEY); } catch { /* ok */ }
+                return `**Google Calendar session expired.** Please click **"Connect Calendar"** to reconnect.`;
+              }
+              return `**Error:** ${msg}`;
+            }
+          }
           const today = todayStr();
           const todayEvents = events.filter((e) => e.date === today);
-          if (todayEvents.length === 0) return `**${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}**\n\nNo events scheduled for today. Looks like a free day!\n\nSay **"Add event: ..."** to schedule something.`;
-          let r = `**Today — ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}**\n\n`;
+          if (todayEvents.length === 0) return `**${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}**\n\nNo events scheduled for today. Looks like a free day!\n\n*Connect Google Calendar to see your real events.*\n\nSay **"Add event: ..."** to schedule something.`;
+          let r = `**Today — ${new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}** (local)\n\n`;
           todayEvents.forEach((e) => {
             r += `- **${e.time || "All day"}** — ${e.title}\n`;
           });
@@ -797,6 +920,26 @@ export default function AssistantPage() {
         }
 
         if ((lower.includes("this week") || lower.includes("week")) && (lower.includes("schedule") || lower.includes("summary") || lower.includes("show") || lower.includes("agenda"))) {
+          if (gcalConnected) {
+            try {
+              const data = await callCalendarApi("list_week");
+              if (!data.events || data.events.length === 0) return "No events this week on Google Calendar. Your schedule is clear!";
+              let r = `**This week** (Google Calendar) — ${data.events.length} event(s):\n\n`;
+              const byDay: Record<string, { time: string; title: string }[]> = {};
+              data.events.forEach((e: { date: string; time: string; title: string }) => {
+                if (!byDay[e.date]) byDay[e.date] = [];
+                byDay[e.date].push(e);
+              });
+              Object.entries(byDay).sort(([a], [b]) => a.localeCompare(b)).forEach(([date, evts]) => {
+                r += `**${date}:**\n`;
+                evts.forEach((e) => { r += `  - ${e.time} — ${e.title}\n`; });
+              });
+              return r;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : "Calendar API error";
+              return `**Error:** ${msg}`;
+            }
+          }
           const now = new Date();
           const weekStart = new Date(now);
           weekStart.setDate(now.getDate() - now.getDay());
@@ -805,8 +948,8 @@ export default function AssistantPage() {
           const startStr = weekStart.toISOString().slice(0, 10);
           const endStr = weekEnd.toISOString().slice(0, 10);
           const weekEvents = events.filter((e) => e.date >= startStr && e.date <= endStr);
-          if (weekEvents.length === 0) return "No events this week. Your schedule is clear!";
-          let r = `**This week (${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })} — ${weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric" })}):**\n\n`;
+          if (weekEvents.length === 0) return "No events this week. Your schedule is clear!\n\n*Connect Google Calendar to see your real events.*";
+          let r = `**This week (${weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" })} — ${weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric" })})** (local):\n\n`;
           const byDay: Record<string, CalendarEvent[]> = {};
           weekEvents.forEach((e) => {
             if (!byDay[e.date]) byDay[e.date] = [];
@@ -821,23 +964,36 @@ export default function AssistantPage() {
         }
 
         if (lower.includes("free") && (lower.includes("slot") || lower.includes("time") || lower.includes("available"))) {
+          if (gcalConnected) {
+            try {
+              const data = await callCalendarApi("free_slots");
+              if (!data.free_slots || data.free_slots.length === 0) return "You're fully booked today! Try looking at tomorrow.";
+              let r = "**Free slots today** (Google Calendar):\n\n";
+              data.free_slots.forEach((slot: string) => { r += `- ${slot}\n`; });
+              return r;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : "Calendar API error";
+              return `**Error:** ${msg}`;
+            }
+          }
           const today = todayStr();
           const todayEvents = events.filter((e) => e.date === today && e.time);
-          const hours = Array.from({ length: 10 }, (_, i) => i + 8); // 8am-5pm
+          const hours = Array.from({ length: 10 }, (_, i) => i + 8);
           const busy = new Set(todayEvents.map((e) => parseInt(e.time!.split(":")[0])));
           const free = hours.filter((h) => !busy.has(h));
           if (free.length === 0) return "You're fully booked today! Try looking at tomorrow.";
-          let r = "**Free slots today:**\n\n";
+          let r = "**Free slots today** (local):\n\n";
           free.forEach((h) => {
             r += `- ${h.toString().padStart(2, "0")}:00 — ${(h + 1).toString().padStart(2, "0")}:00\n`;
           });
+          r += "\n*Connect Google Calendar for accurate availability.*";
           return r;
         }
 
         if (lower.includes("delete") || lower.includes("remove") || lower.includes("cancel")) {
           const today = todayStr();
           const todayEvents = events.filter((e) => e.date === today);
-          if (todayEvents.length === 0) return "No events to remove today.";
+          if (todayEvents.length === 0) return "No local events to remove today.";
           if (todayEvents.length === 1) {
             deleteEvent(todayEvents[0].id);
             return `Removed: **"${todayEvents[0].title}"**`;
@@ -848,7 +1004,10 @@ export default function AssistantPage() {
           return r;
         }
 
-        return `I can manage your calendar. Try:\n- **"Add event: Team standup tomorrow at 10am"**\n- **"Today's agenda"** — view today\n- **"This week"** — weekly overview\n- **"Free slots"** — find open time`;
+        if (!gcalConnected) {
+          return `I can manage your calendar. **Connect Google Calendar** in the sidebar to create real events.\n\nOr try locally:\n- **"Add event: Team standup tomorrow at 10am"**\n- **"Today's agenda"** — view today\n- **"This week"** — weekly overview\n- **"Free slots"** — find open time`;
+        }
+        return `I can manage your Google Calendar. Try:\n- **"Add event: Team standup tomorrow at 10am"** — creates in Google Calendar\n- **"Today's agenda"** — view today's events\n- **"This week"** — weekly overview\n- **"Free slots"** — find open time`;
       }
 
       // ---- FILES ----
@@ -1202,7 +1361,7 @@ export default function AssistantPage() {
       const fallbackSkill = activeSkill as SkillId;
       return `I'm not sure how to handle that for **${SKILL_DEFINITIONS[fallbackSkill].label}**. Try one of the quick actions in the sidebar.`;
     },
-    [activeSkill, tasks, events, sessions, scannedFiles, scannedFolderName, skillConnections, gmailTokens, executorAvailable, addTask, toggleTask, clearCompletedTasks, addEvent, deleteEvent, triggerFolderScan, analyseFiles, callEmailApi]
+    [activeSkill, tasks, events, sessions, scannedFiles, scannedFolderName, skillConnections, gmailTokens, gcalTokens, executorAvailable, addTask, toggleTask, clearCompletedTasks, addEvent, deleteEvent, triggerFolderScan, analyseFiles, callEmailApi, callCalendarApi]
   );
 
   // --- Send message ---
@@ -1406,6 +1565,24 @@ export default function AssistantPage() {
                             <Link2Off className="h-3 w-3" /> Disconnect
                           </button>
                         )}
+                        {skill.id === "calendar" && !isConnected("calendar") && (
+                          <button
+                            onClick={startCalendarOAuth}
+                            className={`mt-1 flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[11px] font-medium transition ${
+                              isDark ? "border-amber-500/30 text-amber-400 hover:bg-amber-500/10" : "border-amber-300 text-amber-600 hover:bg-amber-50"
+                            }`}
+                          >
+                            <Plus className="h-3 w-3" /> Connect Google Calendar
+                          </button>
+                        )}
+                        {skill.id === "calendar" && isConnected("calendar") && (
+                          <button
+                            onClick={() => disconnectSkill("calendar")}
+                            className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[10px] transition ${isDark ? "text-slate-600 hover:text-red-400" : "text-slate-400 hover:text-red-500"}`}
+                          >
+                            <Link2Off className="h-3 w-3" /> Disconnect Calendar
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1590,7 +1767,9 @@ function EmptyState({ skill, isDark, onQuickAction, scannedCount }: { skill: Ski
   };
   const descriptions: Record<SkillId, string> = {
     email: "Connect your email to summarise your inbox, clean up newsletters, draft replies, and triage messages.",
-    calendar: "Manage your schedule — add events, see today's agenda, find free time slots, and plan your week.",
+    calendar: skill.connected
+      ? "Connected to Google Calendar — add events, see your agenda, and find free time."
+      : "Connect Google Calendar to add events, see your agenda, and find free time slots.",
     files: scannedCount > 0
       ? `${scannedCount} files scanned. Ask me to analyse, organise, find large files, or spot duplicates.`
       : "Scan a local folder to get file breakdowns, organisation suggestions, and find space hogs.",
