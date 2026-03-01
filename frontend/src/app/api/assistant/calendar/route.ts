@@ -184,10 +184,28 @@ export async function POST(req: NextRequest) {
         let isAllDay = false;
 
         if (event_data.time) {
-          startDateTime = `${event_data.date}T${event_data.time}:00`;
+          // Normalize time to HH:MM:SS — handle "15:00", "15:00:00", "3pm", etc.
+          let normalizedTime = event_data.time.trim();
+          if (/^\d{1,2}:\d{2}$/.test(normalizedTime)) {
+            normalizedTime = normalizedTime + ":00";
+          } else if (/^\d{1,2}:\d{2}:\d{2}$/.test(normalizedTime)) {
+            // already has seconds
+          } else {
+            // Try to parse as best we can
+            normalizedTime = normalizedTime.replace(/\s+/g, "") + ":00";
+          }
+          // Ensure hours are zero-padded
+          if (/^\d:\d{2}:\d{2}$/.test(normalizedTime)) {
+            normalizedTime = "0" + normalizedTime;
+          }
+          startDateTime = `${event_data.date}T${normalizedTime}`;
           const durationMs = (event_data.duration || 60) * 60 * 1000;
-          endDateTime = new Date(new Date(startDateTime).getTime() + durationMs).toISOString();
-          startDateTime = new Date(startDateTime).toISOString();
+          const startDate = new Date(startDateTime);
+          if (isNaN(startDate.getTime())) {
+            return NextResponse.json({ error: `Invalid time format: "${event_data.time}". Use HH:MM (e.g. "14:30").` }, { status: 400 });
+          }
+          endDateTime = new Date(startDate.getTime() + durationMs).toISOString();
+          startDateTime = startDate.toISOString();
         } else {
           isAllDay = true;
           startDateTime = event_data.date;

@@ -854,42 +854,93 @@ export default function AssistantPage() {
       if (activeSkill === "calendar") {
         const gcalConnected = !!gcalTokens?.access_token;
 
-        const isAddEvent = lower.startsWith("add event") || lower.startsWith("add an event") || lower.startsWith("schedule ") || lower.startsWith("create event") || lower.startsWith("create an event") || lower.startsWith("new event") || /^add\s+.+\s+(?:to|on|in)\s+(?:my\s+)?calendar/i.test(lower);
-        if (isAddEvent) {
-          const cleaned = text.replace(/^(?:add|create|new|schedule)\s*(?:an?\s+)?event:?\s*/i, "").replace(/\s*(?:to|on|in)\s+(?:my\s+)?calendar\s*/i, " ").trim();
-          const parsed = parseEventInput("add event: " + cleaned);
-          if (parsed && parsed.title) {
-            if (gcalConnected) {
-              try {
-                const data = await callCalendarApi("create_event", {
-                  title: parsed.title,
-                  date: parsed.date || todayStr(),
-                  time: parsed.time,
-                  duration: 60,
-                });
-                const ev = data.event;
-                const linkStr = ev.link ? `\n\n[Open in Google Calendar](${ev.link})` : "";
-                return `Event added to **Google Calendar**: **"${ev.title}"** on ${ev.date} at ${ev.time}${linkStr}\n\nSay **"Today's agenda"** to see all your events.`;
-              } catch (e) {
-                const msg = e instanceof Error ? e.message : "Calendar API error";
-                if (msg.includes("expired") || msg.includes("reconnect")) {
-                  setGcalTokens(null);
-                  try { localStorage.removeItem(GCAL_TOKENS_KEY); } catch { /* ok */ }
-                  return `**Google Calendar session expired.** Please click **"Connect Calendar"** to reconnect.`;
-                }
-                return `**Error adding to Google Calendar:** ${msg}`;
+        // Use LLM to understand what the user wants
+        type CalendarIntent = {
+          action: string;
+          event_data?: { title: string; date: string; time?: string | null; duration?: number; description?: string | null } | null;
+          query?: string | null;
+          reasoning?: string;
+        };
+        let intent: CalendarIntent | null = null;
+        try {
+          const intentRes = await fetch("/api/assistant/intent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: text, skill: "calendar" }),
+          });
+          if (intentRes.ok) {
+            intent = await intentRes.json();
+          }
+        } catch {
+          // LLM intent parsing failed — fall back to old keyword matching below
+        }
+
+        // Fall back to keyword matching if LLM intent parsing failed
+        if (!intent || intent.action === "unknown") {
+          if (lower.startsWith("add event") || lower.startsWith("schedule ") || lower.startsWith("create event") || lower.startsWith("new event") || lower.includes("add") && lower.includes("calendar")) {
+            intent = { action: "create_event" };
+            const parsed = parseEventInput(text);
+            if (parsed?.title) {
+              intent.event_data = { title: parsed.title, date: parsed.date || todayStr(), time: parsed.time, duration: 60 };
+            }
+          } else if (lower.includes("today") && (lower.includes("agenda") || lower.includes("schedule") || lower.includes("show"))) {
+            intent = { action: "list_today" };
+          } else if (lower.includes("week")) {
+            intent = { action: "list_week" };
+          } else if (lower.includes("free") && (lower.includes("slot") || lower.includes("time"))) {
+            intent = { action: "free_slots" };
+          } else if (lower.includes("delete") || lower.includes("remove") || lower.includes("cancel")) {
+            intent = { action: "delete_event" };
+          } else {
+            intent = { action: "list_today" };
+          }
+        }
+
+        // --- Handle each calendar action ---
+
+        if (intent.action === "create_event") {
+          const evData = intent.event_data;
+          if (!evData?.title) {
+            return "Please provide event details, e.g. **\"Add event: Team standup tomorrow at 10am\"**";
+          }
+
+          if (gcalConnected) {
+            try {
+              const data = await callCalendarApi("create_event", {
+                title: evData.title,
+                date: evData.date || todayStr(),
+                time: evData.time || undefined,
+                duration: evData.duration || 60,
+                description: evData.description || undefined,
+              });
+              const ev = data.event;
+              const linkStr = ev.link ? `\n\n[Open in Google Calendar](${ev.link})` : "";
+              return `Event added to **Google Calendar**: **"${ev.title}"** on ${ev.date} at ${ev.time}${linkStr}\n\nSay **"Today's agenda"** to see all your events.`;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : "Calendar API error";
+              if (msg.includes("expired") || msg.includes("reconnect")) {
+                setGcalTokens(null);
+                try { localStorage.removeItem(GCAL_TOKENS_KEY); } catch { /* ok */ }
+                return `**Google Calendar session expired.** Please click **"Connect Calendar"** to reconnect.`;
               }
+              return `**Error adding to Google Calendar:** ${msg}`;
             }
-            const ev = addEvent(parsed);
-            if (ev) {
-              const timeStr = ev.time ? ` at ${ev.time}` : "";
-              return `Event added locally: **"${ev.title}"** on ${ev.date}${timeStr}\n\n*Connect Google Calendar to sync events to your real calendar.*\n\nSay **"Today's agenda"** to see all your events.`;
-            }
+          }
+
+          const ev = addEvent({
+            title: evData.title,
+            date: evData.date || todayStr(),
+            time: evData.time || undefined,
+            duration: evData.duration || 60,
+          });
+          if (ev) {
+            const timeStr = ev.time ? ` at ${ev.time}` : "";
+            return `Event added locally: **"${ev.title}"** on ${ev.date}${timeStr}\n\n*Connect Google Calendar to sync events to your real calendar.*\n\nSay **"Today's agenda"** to see all your events.`;
           }
           return "Please provide event details, e.g. **\"Add event: Team standup tomorrow at 10am\"**";
         }
 
-        if (lower.includes("today") && (lower.includes("agenda") || lower.includes("schedule") || lower.includes("show"))) {
+        if (intent.action === "list_today") {
           if (gcalConnected) {
             try {
               const data = await callCalendarApi("list_today");
@@ -919,7 +970,7 @@ export default function AssistantPage() {
           return r;
         }
 
-        if ((lower.includes("this week") || lower.includes("week")) && (lower.includes("schedule") || lower.includes("summary") || lower.includes("show") || lower.includes("agenda"))) {
+        if (intent.action === "list_week") {
           if (gcalConnected) {
             try {
               const data = await callCalendarApi("list_week");
@@ -963,7 +1014,26 @@ export default function AssistantPage() {
           return r;
         }
 
-        if (lower.includes("free") && (lower.includes("slot") || lower.includes("time") || lower.includes("available"))) {
+        if (intent.action === "search") {
+          const q = intent.query || "";
+          if (gcalConnected) {
+            try {
+              const data = await callCalendarApi("search", undefined, q);
+              if (!data.events || data.events.length === 0) return `No events found matching: **"${q}"**`;
+              let r = `**Found ${data.events.length} event(s) matching "${q}":**\n\n`;
+              data.events.forEach((e: { time: string; date: string; title: string; link?: string }) => {
+                r += `- **${e.date}** ${e.time} — ${e.title}\n`;
+              });
+              return r;
+            } catch (e) {
+              const msg = e instanceof Error ? e.message : "Calendar API error";
+              return `**Error:** ${msg}`;
+            }
+          }
+          return "Connect Google Calendar to search events.";
+        }
+
+        if (intent.action === "free_slots") {
           if (gcalConnected) {
             try {
               const data = await callCalendarApi("free_slots");
@@ -977,9 +1047,9 @@ export default function AssistantPage() {
             }
           }
           const today = todayStr();
-          const todayEvents = events.filter((e) => e.date === today && e.time);
+          const todayEvts = events.filter((e) => e.date === today && e.time);
           const hours = Array.from({ length: 10 }, (_, i) => i + 8);
-          const busy = new Set(todayEvents.map((e) => parseInt(e.time!.split(":")[0])));
+          const busy = new Set(todayEvts.map((e) => parseInt(e.time!.split(":")[0])));
           const free = hours.filter((h) => !busy.has(h));
           if (free.length === 0) return "You're fully booked today! Try looking at tomorrow.";
           let r = "**Free slots today** (local):\n\n";
@@ -990,7 +1060,7 @@ export default function AssistantPage() {
           return r;
         }
 
-        if (lower.includes("delete") || lower.includes("remove") || lower.includes("cancel")) {
+        if (intent.action === "delete_event") {
           const today = todayStr();
           const todayEvents = events.filter((e) => e.date === today);
           if (todayEvents.length === 0) return "No local events to remove today.";
@@ -1319,18 +1389,54 @@ export default function AssistantPage() {
         }
 
         try {
-          if (lower.includes("summarise") || lower.includes("summarize") || lower.includes("unread") || lower.includes("inbox")) {
+          setEmailLoading(true);
+
+          // Use LLM to understand what the user actually wants
+          let intent: { action: string; query?: string | null; reasoning?: string } = { action: "summarize" };
+          try {
+            const intentRes = await fetch("/api/assistant/intent", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message: text, skill: "email" }),
+            });
+            if (intentRes.ok) {
+              intent = await intentRes.json();
+            }
+          } catch {
+            // Fall back to keyword matching if intent API fails
+            if (lower.includes("clean") || lower.includes("triage") || lower.includes("newsletter")) {
+              intent = { action: "clean" };
+            } else if (lower.includes("search") || lower.includes("find")) {
+              intent = { action: "search", query: text.replace(/^(search|find)\s*(my\s*)?(inbox\s*)?(for\s*)?(emails?\s*)?(about\s*)?/i, "").trim() };
+            } else if (lower.includes("draft") || lower.includes("reply") || lower.includes("compose")) {
+              intent = { action: "draft_reply" };
+            } else if (lower.includes("list") || lower.includes("show") || lower.includes("fetch")) {
+              intent = { action: "fetch_unread" };
+            }
+          }
+
+          if (intent.action === "fetch_unread") {
+            const data = await callEmailApi("fetch_unread");
+            if (!data.emails || data.emails.length === 0) return "Your inbox is clean — no unread emails!";
+            let r = `**${data.emails.length} unread email(s):**\n\n`;
+            data.emails.forEach((e: { from: string; subject: string; date: string; snippet: string }, i: number) => {
+              r += `${i + 1}. **${e.subject || "(no subject)"}**\n   From: ${e.from} — ${e.date}\n   > ${e.snippet?.slice(0, 100)}...\n\n`;
+            });
+            return r;
+          }
+
+          if (intent.action === "summarize") {
             const data = await callEmailApi("summarize");
             return data.summary || "No summary available.";
           }
 
-          if (lower.includes("clean") || lower.includes("triage") || lower.includes("newsletter") || lower.includes("archive")) {
+          if (intent.action === "clean") {
             const data = await callEmailApi("clean");
             return data.summary || "No analysis available.";
           }
 
-          if (lower.includes("search") || lower.includes("find")) {
-            const searchQuery = text.replace(/^(search|find)\s*(my\s*)?(inbox\s*)?(for\s*)?(emails?\s*)?(about\s*)?/i, "").trim();
+          if (intent.action === "search") {
+            const searchQuery = intent.query || text.replace(/^(search|find)\s*(my\s*)?(inbox\s*)?(for\s*)?(emails?\s*)?(about\s*)?/i, "").trim();
             if (!searchQuery) return "What would you like to search for? Try **\"Search for emails about project deadline\"**";
             const data = await callEmailApi("search", searchQuery);
             if (!data.emails || data.emails.length === 0) return `No emails found matching: **"${searchQuery}"**`;
@@ -1341,12 +1447,12 @@ export default function AssistantPage() {
             return r;
           }
 
-          if (lower.includes("draft") || lower.includes("reply") || lower.includes("compose")) {
+          if (intent.action === "draft_reply") {
             return `Draft/reply functionality requires write access to Gmail. Currently the integration uses **read-only** access for security.\n\nTo enable drafting, add the \`gmail.compose\` scope and implement the compose endpoint.`;
           }
 
-          const data = await callEmailApi("summarize");
-          return data.summary || "I can summarise, clean, or search your emails. What would you like to do?";
+          // "unknown" or unrecognized intent
+          return `I'm not sure how to do that with email yet. I can:\n- **Summarise** your unread emails\n- **Search** for specific emails (e.g. "find emails from John")\n- **Clean** your inbox by categorising emails\n- **List** your unread messages\n\nWhat would you like to do?`;
         } catch (e) {
           const msg = e instanceof Error ? e.message : "Email API error";
           if (msg.includes("expired") || msg.includes("reconnect")) {
@@ -1355,6 +1461,8 @@ export default function AssistantPage() {
             return `**Gmail session expired.** Please click **"Connect Email"** to reconnect.`;
           }
           return `**Error:** ${msg}\n\nTry reconnecting Gmail if this persists.`;
+        } finally {
+          setEmailLoading(false);
         }
       }
 
