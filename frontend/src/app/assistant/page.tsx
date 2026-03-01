@@ -771,8 +771,10 @@ export default function AssistantPage() {
 
       // ---- CALENDAR ----
       if (activeSkill === "calendar") {
-        if (lower.startsWith("add event:") || lower.startsWith("add event ") || lower.startsWith("schedule ")) {
-          const parsed = parseEventInput(text);
+        const isAddEvent = lower.startsWith("add event") || lower.startsWith("add an event") || lower.startsWith("schedule ") || lower.startsWith("create event") || lower.startsWith("create an event") || lower.startsWith("new event") || /^add\s+.+\s+(?:to|on|in)\s+(?:my\s+)?calendar/i.test(lower);
+        if (isAddEvent) {
+          const cleaned = text.replace(/^(?:add|create|new|schedule)\s*(?:an?\s+)?event:?\s*/i, "").replace(/\s*(?:to|on|in)\s+(?:my\s+)?calendar\s*/i, " ").trim();
+          const parsed = parseEventInput("add event: " + cleaned);
           if (parsed && parsed.title) {
             const ev = addEvent(parsed);
             if (ev) {
@@ -1200,7 +1202,7 @@ export default function AssistantPage() {
       const fallbackSkill = activeSkill as SkillId;
       return `I'm not sure how to handle that for **${SKILL_DEFINITIONS[fallbackSkill].label}**. Try one of the quick actions in the sidebar.`;
     },
-    [activeSkill, tasks, events, sessions, scannedFiles, scannedFolderName, skillConnections, gmailTokens, executorAvailable, addTask, clearCompletedTasks, addEvent, deleteEvent, triggerFolderScan, analyseFiles, callEmailApi]
+    [activeSkill, tasks, events, sessions, scannedFiles, scannedFolderName, skillConnections, gmailTokens, executorAvailable, addTask, toggleTask, clearCompletedTasks, addEvent, deleteEvent, triggerFolderScan, analyseFiles, callEmailApi]
   );
 
   // --- Send message ---
@@ -1386,7 +1388,7 @@ export default function AssistantPage() {
                             {qa.label}
                           </button>
                         ))}
-                        {skill.id === "email" && !skillConnections["email"]?.connected && (
+                        {skill.id === "email" && !isConnected("email") && (
                           <button
                             onClick={() => setShowConnectModal("email")}
                             className={`mt-1 flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[11px] font-medium transition ${
@@ -1396,7 +1398,7 @@ export default function AssistantPage() {
                             <Plus className="h-3 w-3" /> Connect Email
                           </button>
                         )}
-                        {skill.id === "email" && skillConnections["email"]?.connected && (
+                        {skill.id === "email" && isConnected("email") && (
                           <button
                             onClick={() => disconnectSkill("email")}
                             className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[10px] transition ${isDark ? "text-slate-600 hover:text-red-400" : "text-slate-400 hover:text-red-500"}`}
