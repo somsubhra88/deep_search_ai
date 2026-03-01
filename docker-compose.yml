@@ -12,6 +12,18 @@ services:
       retries: 3
     restart: unless-stopped
 
+  executor:
+    build:
+      context: ./executor-rust
+      dockerfile: Dockerfile
+    ports:
+      - "7777:7777"
+    environment:
+      - HOME=${HOME:-/tmp}
+    volumes:
+      - ${HOME:-/tmp}:${HOME:-/tmp}:rw
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -25,12 +37,15 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - SEMANTIC_CACHE_DB=/app/data/semantic_cache.db
       - AGENT_BROWSER_WORKDIR=/tmp/agent_browser
-    volumes:
-      - ./.env:/app/.env
-      - backend_data:/app/data
+      - EXECUTOR_URL=http://executor:7777
     depends_on:
       redis:
         condition: service_healthy
+      executor:
+        condition: service_started
+    volumes:
+      - ./.env:/app/.env
+      - backend_data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
       interval: 15s

@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from collections import defaultdict
 from typing import Literal, Optional
 import httpx
@@ -58,6 +59,12 @@ from app.kb_schemas import (
     UploadResponse, RAGQueryRequest, RAGResponse,
 )
 from app.models.inception_client import InceptionLLMClient, InceptionConfig, ChatMessage
+from app.assistant_agent import act as run_assistant_act
+from app.executor_client import (
+    approval_respond,
+    events_stream_url,
+    is_executor_available,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -145,15 +152,22 @@ app = FastAPI(
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+_frontend_port = os.getenv("FRONTEND_PORT", "3000")
+_cors_origins = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://frontend:3000",
+]
+if _frontend_port not in ("3000", "3001"):
+    _cors_origins.extend([
+        f"http://localhost:{_frontend_port}",
+        f"http://127.0.0.1:{_frontend_port}",
+    ])
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://frontend:3000",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
@@ -512,6 +526,93 @@ async def research(request: Request, body: ResearchRequest):
             yield {"event": "error", "data": json.dumps({"error": err_msg})}
 
     return EventSourceResponse(event_generator())
+
+
+# ---------------------------------------------------------------------------
+# Assistant Actions (executor-backed, real actions)
+# ---------------------------------------------------------------------------
+
+class AssistantActRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    run_id: str | None = None
+    context: dict | None = None
+    model_id: str = Field(default_factory=lambda: os.getenv("DEFAULT_MODEL_PROVIDER", "openai"))
+
+
+class AssistantApproveRequest(BaseModel):
+    approval_id: str
+    decision: Literal["approve", "deny"] = "approve"
+    save_rule: dict | None = None
+
+
+@app.get("/api/assistant/status")
+async def assistant_status():
+    """Check if executor is available for real actions."""
+    return {"executor_available": is_executor_available()}
+
+
+@app.post("/api/assistant/act")
+async def assistant_act(body: AssistantActRequest):
+    """
+    Take real action based on user message.
+    Uses LLM to pick tool, executes via local executor.
+    For destructive actions (delete, shell, download), executor may require approval.
+    """
+    run_id = body.run_id or str(uuid.uuid4())
+    try:
+        result = await run_assistant_act(
+            message=body.message,
+            run_id=run_id,
+            context=body.context,
+            model_id=body.model_id,
+        )
+        return result
+    except Exception as e:
+        logger.exception("assistant act failed: %s", e)
+        raise HTTPException(status_code=500, detail=_sanitize_error(str(e)))
+
+
+@app.post("/api/assistant/approve")
+async def assistant_approve(body: AssistantApproveRequest):
+    """Respond to a pending approval (approve or deny destructive action)."""
+    try:
+        result = await approval_respond(
+            approval_id=body.approval_id,
+            decision=body.decision,
+            save_rule=body.save_rule,
+        )
+        return result
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=e.response.text[:500] if e.response else str(e),
+        )
+    except Exception as e:
+        logger.exception("assistant approve failed: %s", e)
+        raise HTTPException(status_code=500, detail=_sanitize_error(str(e)))
+
+
+@app.get("/api/assistant/runs/{run_id}/events")
+async def assistant_run_events(request: Request, run_id: str):
+    """SSE proxy to executor run events (for approval_required, tool_result, etc.)."""
+    try:
+        uuid.UUID(run_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid run_id format")
+    url = events_stream_url(run_id)
+    async def event_gen():
+        async with httpx.AsyncClient(timeout=30) as client:
+            async with client.stream("GET", url) as resp:
+                async for chunk in resp.aiter_bytes():
+                    if await request.is_disconnected():
+                        return
+                    yield chunk
+    from starlette.responses import StreamingResponse
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @app.exception_handler(HTTPException)

@@ -20,6 +20,7 @@ copy_if_exists() {
 }
 
 copy_if_exists "${ROOT_DIR}/backend" "${PACKAGE_DIR}/backend"
+copy_if_exists "${ROOT_DIR}/executor-rust" "${PACKAGE_DIR}/executor-rust"
 copy_if_exists "${ROOT_DIR}/frontend" "${PACKAGE_DIR}/frontend"
 copy_if_exists "${ROOT_DIR}/docker-compose.yml" "${PACKAGE_DIR}/docker-compose.yml"
 copy_if_exists "${ROOT_DIR}/Makefile" "${PACKAGE_DIR}/Makefile"

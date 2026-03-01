@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { ThemeProvider } from "@/context/ThemeContext";
+import SharedHeader from "@/components/navigation/SharedHeader";
 
 export const metadata: Metadata = {
   title: "Deep Search AI Agent",
@@ -14,7 +16,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="font-sans antialiased">
-        {children}
+        <ThemeProvider>
+          <SharedHeader />
+          {children}
+        </ThemeProvider>
       </body>
     </html>
   );

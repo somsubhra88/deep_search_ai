@@ -69,3 +69,6 @@ yarn-error.log*
 # Distribution artifacts
 dist/
 *.tar.gz
+
+# Rust (executor-rust)
+executor-rust/target/
