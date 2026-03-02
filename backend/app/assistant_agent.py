@@ -171,10 +171,6 @@ async def act(
         }
 
     try:
-        payload: dict[str, Any] = {"tool": tool, "run_id": run_id, "dry_run": False}
-        if context:
-            payload["context"] = context
-
         result = await execute_tool(
             tool=tool,
             run_id=run_id,
@@ -203,3 +199,46 @@ async def act(
             "tool": tool,
             "executor_available": True,
         }
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat (OpenClaw-style: periodic autonomous check)
+# ---------------------------------------------------------------------------
+
+
+async def run_heartbeat(
+    context: dict | None = None,
+    model_id: str = "openai",
+) -> dict[str, Any]:
+    """
+    Run an autonomous heartbeat check. Uses LLM to decide if the user needs an alert.
+    Returns { status: "ok" | "alert", message?: str }.
+    """
+    ctx = context or {}
+    pending_tasks = ctx.get("pending_tasks", 0)
+    events_today = ctx.get("events_today", 0)
+    executor_available = ctx.get("executor_available")
+    summary_parts = [
+        f"Pending tasks: {pending_tasks}",
+        f"Events today: {events_today}",
+        f"Executor (file/notes/shell): {'available' if executor_available else 'not connected'}",
+    ]
+    if ctx.get("last_alert"):
+        summary_parts.append(f"Last user-dismissed alert was: {ctx['last_alert'][:80]}...")
+    prompt = "Current context:\n" + "\n".join(summary_parts) + "\n\nShould the user be alerted? Reply HEARTBEAT_OK or one short alert sentence."
+
+    try:
+        from langchain_core.messages import HumanMessage
+
+        llm = _get_llm(model_id)
+        resp = await llm.ainvoke([HumanMessage(content=prompt)])
+        raw = (resp.content if hasattr(resp, "content") else str(resp)).strip()
+        upper = raw.upper()
+        if "HEARTBEAT_OK" in upper or upper == "OK":
+            return {"status": "ok"}
+        if not raw or len(raw) > 500:
+            return {"status": "ok"}
+        return {"status": "alert", "message": raw}
+    except Exception as e:
+        logger.exception("heartbeat failed: %s", e)
+        return {"status": "ok"}  # Fail open: no spurious alerts

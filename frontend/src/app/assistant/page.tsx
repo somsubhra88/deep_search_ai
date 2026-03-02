@@ -218,6 +218,9 @@ const SKILL_DEFINITIONS: Record<SkillId, Omit<SkillConfig, "connected" | "provid
 
 const SKILL_ORDER: SkillId[] = ["actions", "tasks", "email", "calendar", "files", "research"];
 
+// Shared copy for assistant responses
+const NO_FILES_SCANNED = "No files scanned yet. Use **\"Scan a folder\"** first.";
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -338,6 +341,9 @@ export default function AssistantPage() {
     summary: string;
   } | null>(null);
   const [executorAvailable, setExecutorAvailable] = useState<boolean | null>(null);
+  const [lastHeartbeatAt, setLastHeartbeatAt] = useState<number | null>(null);
+  const [heartbeatAlert, setHeartbeatAlert] = useState<string | null>(null);
+  const [heartbeatDismissed, setHeartbeatDismissed] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -351,6 +357,40 @@ export default function AssistantPage() {
       .then((d) => setExecutorAvailable(d.executor_available ?? false))
       .catch(() => setExecutorAvailable(false));
   }, []);
+
+  // --- Heartbeat (OpenClaw-style: periodic autonomous check) ---
+  useEffect(() => {
+    const run = async () => {
+      const pendingCount = tasks.filter((t) => !t.done).length;
+      const todayEventCount = events.filter((e) => e.date === todayStr()).length;
+      try {
+        const res = await fetch("/api/assistant/heartbeat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            context: {
+              pending_tasks: pendingCount,
+              events_today: todayEventCount,
+              executor_available: executorAvailable === true,
+            },
+          }),
+        });
+        const data = await res.json();
+        setLastHeartbeatAt(Date.now());
+        if (data.status === "alert" && data.message) {
+          setHeartbeatAlert(data.message);
+          setHeartbeatDismissed(false);
+        } else {
+          setHeartbeatAlert(null);
+        }
+      } catch {
+        setLastHeartbeatAt(Date.now());
+      }
+    };
+    run();
+    const interval = setInterval(run, 30 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [tasks, events, executorAvailable]);
 
   // --- Load persisted state ---
   useEffect(() => {
@@ -381,6 +421,39 @@ export default function AssistantPage() {
   const persistEvents = useCallback((next: CalendarEvent[]) => {
     setEvents(next);
     compressAndStore(EVENTS_KEY, next);
+  }, []);
+
+  const getIntent = useCallback(async (skill: SkillId, message: string): Promise<Record<string, unknown> | null> => {
+    try {
+      const res = await fetch("/api/assistant/intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, skill }),
+      });
+      if (!res.ok) return null;
+      return (await res.json()) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const subscribeApprovalEvents = useCallback((runId: string, onApproval: (p: { approvalId: string; tool: string; runId: string; summary: string }) => void) => {
+    const es = new EventSource(`/api/assistant/runs/${runId}/events`);
+    es.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if (ev.type === "approval_required" && ev.data?.approval_id) {
+          onApproval({
+            approvalId: ev.data.approval_id,
+            tool: ev.data.tool || "action",
+            runId,
+            summary: `Approve: ${ev.data.tool || "action"} (risk ${ev.data.risk_level ?? "?"})`,
+          });
+        }
+      } catch { /* ignore */ }
+    };
+    es.onerror = () => { es.close(); };
+    return () => { es.close(); };
   }, []);
 
   // --- Task CRUD ---
@@ -548,7 +621,7 @@ export default function AssistantPage() {
   }, [persistTasks, persistEvents]);
 
   // --- Email API caller ---
-  const callEmailApi = useCallback(async (action: string, query?: string) => {
+  const callEmailApi = useCallback(async (action: string, query?: string, userMessage?: string) => {
     if (!gmailTokens?.access_token) throw new Error("Gmail not connected. Please connect Gmail first.");
     const res = await fetch("/api/assistant/email", {
       method: "POST",
@@ -558,6 +631,7 @@ export default function AssistantPage() {
         access_token: gmailTokens.access_token,
         refresh_token: gmailTokens.refresh_token,
         query,
+        user_message: userMessage,
       }),
     });
     const data = await res.json();
@@ -609,6 +683,7 @@ export default function AssistantPage() {
   // --- Google Calendar API caller ---
   const callCalendarApi = useCallback(async (action: string, eventData?: { title: string; date: string; time?: string; duration?: number; description?: string }, query?: string) => {
     if (!gcalTokens?.access_token) throw new Error("Google Calendar not connected. Please connect Google Calendar first.");
+    const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const res = await fetch("/api/assistant/calendar", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -618,6 +693,7 @@ export default function AssistantPage() {
         refresh_token: gcalTokens.refresh_token,
         event_data: eventData,
         query,
+        timezone: userTimezone,
       }),
     });
     const data = await res.json();
@@ -738,36 +814,40 @@ export default function AssistantPage() {
         if (executorAvailable !== true) {
           return "**Actions unavailable.** Start the executor: `cd executor-rust && cargo run`\n\nThe executor runs on 127.0.0.1:7777 and performs real file, note, clipboard, and shell actions.";
         }
+
+        const actionsIntent = await getIntent("actions", text);
+        const isQuestion = actionsIntent?.action === "question";
+
+        if (isQuestion) {
+          try {
+            const chatRes = await fetch("/api/assistant/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                system: "You are a helpful computer assistant. You can perform real actions: list/read/write/delete files, run shell commands, create/search notes, and manage the clipboard. Answer the user's question about your capabilities or help them formulate their request. Be concise.",
+                message: text,
+              }),
+            });
+            if (chatRes.ok) {
+              const data = await chatRes.json();
+              if (data.response) return data.response;
+            }
+          } catch { /* fall through */ }
+          return `I can perform real actions on your computer:\n- **List/read/write/delete files**\n- **Run shell commands**\n- **Create and search notes**\n- **Copy to/from clipboard**\n- **Download files from URLs**\n\nJust tell me what you'd like to do!`;
+        }
+
         setActionsLoading(true);
         setPendingApproval(null);
         const runId = genId();
-        let es: EventSource | null = null;
+        const closeEs = subscribeApprovalEvents(runId, setPendingApproval);
         try {
-          es = new EventSource(`/api/assistant/runs/${runId}/events`);
-          es.onmessage = (e) => {
-            try {
-              const ev = JSON.parse(e.data);
-              if (ev.type === "approval_required" && ev.data?.approval_id) {
-                setPendingApproval({
-                  approvalId: ev.data.approval_id,
-                  tool: ev.data.tool || "action",
-                  runId,
-                  summary: `Approve: ${ev.data.tool || "action"} (risk ${ev.data.risk_level ?? "?"})`,
-                });
-              }
-            } catch { /* ignore parse errors */ }
-          };
-          es.onerror = () => { es?.close(); };
           const res = await fetch("/api/assistant/act", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ message: text.trim(), run_id: runId }),
             signal: AbortSignal.timeout(120_000),
           });
-          es.close();
-          es = null;
           const data = await res.json();
-          setPendingApproval(null);
           if (data.error) {
             return `**Error:** ${data.error}`;
           }
@@ -787,26 +867,44 @@ export default function AssistantPage() {
           }
           return data.message || "Action completed.";
         } catch (e) {
-          setPendingApproval(null);
           return `**Request failed:** ${e instanceof Error ? e.message : String(e)}`;
         } finally {
-          es?.close();
+          closeEs();
+          setPendingApproval(null);
           setActionsLoading(false);
         }
       }
 
       // ---- TASKS ----
       if (activeSkill === "tasks") {
-        if (lower.startsWith("add task:") || lower.startsWith("add task ") || lower.startsWith("add ") || lower.startsWith("create task")) {
-          const taskText = text.replace(/^(?:add|create)\s*task:?\s*/i, "").trim();
+        let taskIntent = (await getIntent("tasks", text)) as { action: string; task_text?: string | null; reasoning?: string } | null;
+        if (!taskIntent) {
+          if (lower.startsWith("add task") || lower.startsWith("add ") || lower.startsWith("create task")) {
+            taskIntent = { action: "add_task", task_text: text.replace(/^(?:add|create)\s*task:?\s*/i, "").trim() };
+          } else if (lower.includes("complete") || lower.includes("done") || lower.includes("finish")) {
+            taskIntent = { action: "complete_task", task_text: text.replace(/^(?:complete|done|finish|check off|mark done):?\s*/i, "").trim() };
+          } else if (lower.includes("show") || lower.includes("list") || lower.includes("todo") || lower.includes("pending")) {
+            taskIntent = { action: "show_tasks" };
+          } else if (lower.includes("clear") && lower.includes("completed")) {
+            taskIntent = { action: "clear_completed" };
+          } else if (lower.includes("next") || lower.includes("should") || lower.includes("prioriti")) {
+            taskIntent = { action: "prioritize" };
+          } else {
+            taskIntent = { action: "show_tasks" };
+          }
+        }
+
+        if (taskIntent.action === "add_task") {
+          const taskText = (taskIntent.task_text || "").trim();
           if (taskText) {
             addTask(taskText);
             return `Added task: **"${taskText}"**\n\nYou now have ${tasks.filter((t) => !t.done).length + 1} pending task(s).`;
           }
-          return "Please specify what to add, e.g. **\"Add task: Buy groceries\"**.";
+          return "What task would you like to add? Just tell me what you need to do.";
         }
-        if (lower.includes("complete") || lower.includes("done") || lower.includes("finish") || lower.includes("check off")) {
-          const taskRef = text.replace(/^(?:complete|done|finish|check off|mark done):?\s*/i, "").trim().toLowerCase();
+
+        if (taskIntent.action === "complete_task") {
+          const taskRef = (taskIntent.task_text || "").trim().toLowerCase();
           if (taskRef) {
             const pending = tasks.filter((t) => !t.done);
             const match = pending.find((t) => t.text.toLowerCase().includes(taskRef));
@@ -824,11 +922,13 @@ export default function AssistantPage() {
             }
             return `No pending task matching "${taskRef}". Say **"Show my tasks"** to see the list.`;
           }
+          return "Which task did you complete? Tell me the task name or number.";
         }
-        if (lower.includes("show") && (lower.includes("task") || lower.includes("todo") || lower.includes("pending") || lower.includes("list"))) {
+
+        if (taskIntent.action === "show_tasks") {
           const pending = tasks.filter((t) => !t.done);
           const done = tasks.filter((t) => t.done);
-          if (tasks.length === 0) return "Your task list is empty. Try **\"Add task: Buy groceries\"** to create one.";
+          if (tasks.length === 0) return "Your task list is empty. Just tell me what you need to do and I'll add it!";
           let r = `**Pending (${pending.length}):**\n`;
           pending.forEach((t, i) => { r += `${i + 1}. ${t.text}\n`; });
           if (done.length > 0) {
@@ -838,44 +938,53 @@ export default function AssistantPage() {
           }
           return r;
         }
-        if (lower.includes("clear") && lower.includes("completed")) {
+
+        if (taskIntent.action === "clear_completed") {
           const count = clearCompletedTasks();
           return count > 0 ? `Cleared **${count}** completed task(s).` : "No completed tasks to clear.";
         }
-        if (lower.includes("what") && (lower.includes("next") || lower.includes("should"))) {
+
+        if (taskIntent.action === "prioritize") {
           const pending = tasks.filter((t) => !t.done);
           if (pending.length === 0) return "No pending tasks! Enjoy the free time or add something new.";
+          if (pending.length === 1) return `You only have one task:\n\n**→ ${pending[0].text}**\n\nKnock it out!`;
+          try {
+            const taskList = pending.map((t, i) => `${i + 1}. ${t.text}`).join("\n");
+            const chatRes = await fetch("/api/assistant/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                system: "You are a productivity coach. Given the user's task list, recommend which task to focus on first and why. Be brief (3-4 sentences max). Use markdown with bold for emphasis.",
+                message: `My pending tasks:\n${taskList}\n\nWhat should I focus on first?`,
+              }),
+            });
+            if (chatRes.ok) {
+              const data = await chatRes.json();
+              if (data.response) return data.response;
+            }
+          } catch { /* fall through */ }
           return `Your top task:\n\n**→ ${pending[0].text}**\n\n${pending.length > 1 ? `Plus ${pending.length - 1} more pending.` : "That's your only task — knock it out!"}`;
         }
-        return `I can manage your tasks. Try:\n- **"Add task: ..."** — create a task\n- **"Show my tasks"** — list everything\n- **"Clear completed"** — tidy up\n- **"What's next?"** — get a recommendation`;
+
+        if (taskIntent.action === "ask") {
+          const pending = tasks.filter((t) => !t.done);
+          const done = tasks.filter((t) => t.done);
+          return `You have **${pending.length}** pending and **${done.length}** completed task(s).\n\nJust tell me what you need to do and I'll add it, or say **"show my tasks"** to see everything.`;
+        }
+
+        return `Just tell me what you need to do! For example:\n- **"I need to buy groceries"** — I'll add it as a task\n- **"Show my tasks"** — see everything\n- **"Done with groceries"** — mark it complete\n- **"What should I focus on?"** — get a recommendation`;
       }
 
       // ---- CALENDAR ----
       if (activeSkill === "calendar") {
         const gcalConnected = !!gcalTokens?.access_token;
-
-        // Use LLM to understand what the user wants
         type CalendarIntent = {
           action: string;
           event_data?: { title: string; date: string; time?: string | null; duration?: number; description?: string | null } | null;
           query?: string | null;
           reasoning?: string;
         };
-        let intent: CalendarIntent | null = null;
-        try {
-          const intentRes = await fetch("/api/assistant/intent", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: text, skill: "calendar" }),
-          });
-          if (intentRes.ok) {
-            intent = await intentRes.json();
-          }
-        } catch {
-          // LLM intent parsing failed — fall back to old keyword matching below
-        }
-
-        // Fall back to keyword matching if LLM intent parsing failed
+        let intent = (await getIntent("calendar", text)) as CalendarIntent | null;
         if (!intent || intent.action === "unknown") {
           if (lower.startsWith("add event") || lower.startsWith("schedule ") || lower.startsWith("create event") || lower.startsWith("new event") || lower.includes("add") && lower.includes("calendar")) {
             intent = { action: "create_event" };
@@ -1084,33 +1193,28 @@ export default function AssistantPage() {
       if (activeSkill === "files") {
         const noFiles = scannedFiles.length === 0;
         const folderBase = scannedFolderName ? `~/${scannedFolderName}` : "YOUR_FOLDER";
+        let fileIntent = (await getIntent("files", text)) as { action: string; file_type?: string | null; file_name?: string | null; reasoning?: string } | null;
+        if (!fileIntent) fileIntent = { action: "analyze" };
+        if (fileIntent.action === "analyze" || fileIntent.action === "unknown") {
+          if (lower.includes("scan") || text === "Scan folder") fileIntent = { action: "scan" };
+          else if (lower.includes("organis") || lower.includes("organiz") || lower.includes("sort")) fileIntent = { action: "organize" };
+          else if ((lower.includes("remove") || lower.includes("delete")) && lower.includes("large")) fileIntent = { action: "remove_large" };
+          else if (lower.includes("large") || lower.includes("biggest") || lower.includes("size")) fileIntent = { action: "find_large" };
+          else if ((lower.includes("remove") || lower.includes("delete")) && lower.includes("duplicate")) fileIntent = { action: "remove_duplicates" };
+          else if (lower.includes("duplicate") || lower.includes("dupe")) fileIntent = { action: "find_duplicates" };
+          else if ((lower.includes("archive") || lower.includes("remove")) && (lower.includes("old") || lower.includes("stale"))) fileIntent = { action: "archive_old" };
+          else if (lower.includes("old") || lower.includes("stale")) fileIntent = { action: "find_old" };
+        }
 
-        // Delegate trash/delete specific file to Actions executor when available
-        const trashMatch = lower.match(/(?:put|move|send)\s+(?:the\s+)?(?:file\s+)?["']?([^\s"']+)["']?\s+(?:to|in)\s+(?:the\s+)?(?:trash|bin|recycle)/i)
-          || lower.match(/(?:trash|delete|remove)\s+(?:the\s+)?(?:file\s+)?["']?([^\s"']+)["']?/i)
-          || lower.match(/(?:put|move)\s+["']?([^\s"']+)["']?\s+(?:to|in)\s+(?:the\s+)?trash/i);
-        if (!noFiles && scannedFolderName && executorAvailable && (lower.includes("trash") || lower.includes("delete") || lower.includes("remove")) && trashMatch) {
-          const mentionedName = trashMatch[1];
-          const matched = scannedFiles.find((f) => f.name === mentionedName || f.name.toLowerCase() === mentionedName.toLowerCase());
+        // Handle trash_file via executor
+        if (fileIntent.action === "trash_file" && fileIntent.file_name && !noFiles && scannedFolderName && executorAvailable) {
+          const matched = scannedFiles.find((f) => f.name === fileIntent.file_name || f.name.toLowerCase() === fileIntent.file_name!.toLowerCase());
           if (matched) {
             const fullPath = `~/${scannedFolderName}/${matched.name}`;
             setActionsLoading(true);
             setPendingApproval(null);
             const runId = genId();
-            const es = new EventSource(`/api/assistant/runs/${runId}/events`);
-            es.onmessage = (e) => {
-              try {
-                const ev = JSON.parse(e.data);
-                if (ev.type === "approval_required" && ev.data?.approval_id) {
-                  setPendingApproval({
-                    approvalId: ev.data.approval_id,
-                    tool: ev.data.tool || "fs_delete",
-                    runId,
-                    summary: `Approve: trash ${matched.name}`,
-                  });
-                }
-              } catch { /* ignore */ }
-            };
+            const closeEs = subscribeApprovalEvents(runId, (p) => setPendingApproval({ ...p, summary: `Approve: trash ${matched.name}` }));
             try {
               const res = await fetch("/api/assistant/act", {
                 method: "POST",
@@ -1122,9 +1226,7 @@ export default function AssistantPage() {
                 }),
                 signal: AbortSignal.timeout(120_000),
               });
-              es.close();
               const data = await res.json();
-              setPendingApproval(null);
               if (data.error) return `**Error:** ${data.error}`;
               if (data.result?.result?.ok && data.result?.result?.data?.trashed) {
                 return `**Done.** Moved \`${matched.name}\` to Trash.`;
@@ -1132,22 +1234,23 @@ export default function AssistantPage() {
               if (data.result?.result?.error) return `**Error:** ${data.result.result.error}`;
               return data.message || "Action completed.";
             } catch (e) {
-              es.close();
-              setPendingApproval(null);
               return `**Request failed:** ${e instanceof Error ? e.message : String(e)}`;
             } finally {
+              closeEs();
+              setPendingApproval(null);
               setActionsLoading(false);
             }
           }
+          return `Could not find a file named "${fileIntent.file_name}" in the scanned folder.`;
         }
 
-        if (lower.includes("scan") || text === "Scan folder") {
+        if (fileIntent.action === "scan") {
           triggerFolderScan();
           return "**Opening folder picker...** Select a folder to scan.\n\nOnce scanned, I can:\n- Break down files by category & suggest organisation\n- Find large files and generate a command to **delete** them\n- Spot duplicates and generate a command to **remove** them\n- Create a script to **sort files into subfolders** by type\n- Find old/stale files and **archive** them";
         }
 
-        if (lower.includes("organis") || lower.includes("organiz") || lower.includes("sort into") || lower.includes("sort files") || (lower.includes("categori") && (lower.includes("file") || lower.includes("folder")))) {
-          if (noFiles) return "No files scanned yet. Use **\"Scan a folder\"** first.";
+        if (fileIntent.action === "organize") {
+          if (noFiles) return NO_FILES_SCANNED;
           const analysis = analyseFiles(scannedFiles);
 
           const byCategory: Record<string, ScannedFile[]> = {};
@@ -1172,8 +1275,8 @@ export default function AssistantPage() {
           return `${analysis}\n\n---\n\n**Ready-to-run organisation script:**\n\nCopy this and run it in your terminal:\n\n\`\`\`bash\n${script}\`\`\`\n\n*Review the commands before running. Use \`mv -i\` instead of \`mv\` if you want confirmation prompts.*`;
         }
 
-        if ((lower.includes("remove") || lower.includes("delete") || lower.includes("clean") || lower.includes("script") || lower.includes("generate")) && (lower.includes("large") || lower.includes("big") || lower.includes("heavy"))) {
-          if (noFiles) return "No files scanned yet. Use **\"Scan a folder\"** first.";
+        if (fileIntent.action === "remove_large") {
+          if (noFiles) return NO_FILES_SCANNED;
           const threshold = 10 * 1024 * 1024;
           const large = [...scannedFiles].filter((f) => f.size > threshold).sort((a, b) => b.size - a.size);
           if (large.length === 0) return `No files larger than ${formatBytes(threshold)} found. Your folder is already lean!`;
@@ -1193,8 +1296,8 @@ export default function AssistantPage() {
           return r;
         }
 
-        if (lower.includes("large") || lower.includes("biggest") || lower.includes("size")) {
-          if (noFiles) return "No files scanned yet. Use **\"Scan a folder\"** first.";
+        if (fileIntent.action === "find_large") {
+          if (noFiles) return NO_FILES_SCANNED;
           const sorted = [...scannedFiles].sort((a, b) => b.size - a.size).slice(0, 15);
           let r = `**Largest files in "${scannedFolderName}":**\n\n`;
           sorted.forEach((f, i) => {
@@ -1206,8 +1309,8 @@ export default function AssistantPage() {
           return r;
         }
 
-        if ((lower.includes("remove") || lower.includes("delete") || lower.includes("clean") || lower.includes("script") || lower.includes("generate")) && (lower.includes("duplicate") || lower.includes("dupe"))) {
-          if (noFiles) return "No files scanned yet. Use **\"Scan a folder\"** first.";
+        if (fileIntent.action === "remove_duplicates") {
+          if (noFiles) return NO_FILES_SCANNED;
           const nameCount: Record<string, ScannedFile[]> = {};
           scannedFiles.forEach((f) => {
             if (!nameCount[f.name]) nameCount[f.name] = [];
@@ -1235,8 +1338,8 @@ export default function AssistantPage() {
           return r;
         }
 
-        if (lower.includes("duplicate") || lower.includes("dupe")) {
-          if (noFiles) return "No files scanned yet. Use **\"Scan a folder\"** first.";
+        if (fileIntent.action === "find_duplicates") {
+          if (noFiles) return NO_FILES_SCANNED;
           const nameCount: Record<string, ScannedFile[]> = {};
           scannedFiles.forEach((f) => {
             if (!nameCount[f.name]) nameCount[f.name] = [];
@@ -1252,10 +1355,8 @@ export default function AssistantPage() {
           return r;
         }
 
-        const wantsOldAction = lower.includes("remove") || lower.includes("delete") || lower.includes("clean") || lower.includes("archive") || lower.includes("script") || lower.includes("generate");
-        const mentionsOld = lower.includes("old") || lower.includes("stale");
-        if (wantsOldAction && mentionsOld) {
-          if (noFiles) return "No files scanned yet. Use **\"Scan a folder\"** first.";
+        if (fileIntent.action === "archive_old") {
+          if (noFiles) return NO_FILES_SCANNED;
           const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
           const old = scannedFiles.filter((f) => f.lastModified < cutoff).sort((a, b) => a.lastModified - b.lastModified);
           if (old.length === 0) return "No files older than 90 days found.";
@@ -1275,8 +1376,8 @@ export default function AssistantPage() {
           return r;
         }
 
-        if (mentionsOld || lower.includes("archive")) {
-          if (noFiles) return "No files scanned yet. Use **\"Scan a folder\"** first.";
+        if (fileIntent.action === "find_old") {
+          if (noFiles) return NO_FILES_SCANNED;
           const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000;
           const old = scannedFiles.filter((f) => f.lastModified < cutoff);
           if (old.length === 0) return "No files older than 90 days found.";
@@ -1288,61 +1389,39 @@ export default function AssistantPage() {
           return r;
         }
 
-        // List files by type: "list CSV files", "show csv files", "list down the csv file", etc.
-        const listIntent = lower.includes("list") || lower.includes("show") || lower.includes("find") || lower.includes("what") || lower.includes("which");
-        const extFromPhrase: Record<string, string[]> = {
-          csv: ["csv"],
-          "csv file": ["csv"],
-          "csv files": ["csv"],
-          pdf: ["pdf"],
-          "pdf file": ["pdf"],
-          "pdf files": ["pdf"],
-          excel: ["xls", "xlsx", "csv", "tsv"],
-          spreadsheet: ["xls", "xlsx", "csv", "tsv", "ods", "numbers"],
-          spreadsheets: ["xls", "xlsx", "csv", "tsv", "ods", "numbers"],
-          image: ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "tiff"],
-          images: ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "tiff"],
-          document: ["pdf", "doc", "docx", "txt", "rtf", "odt", "pages", "md", "tex"],
-          documents: ["pdf", "doc", "docx", "txt", "rtf", "odt", "pages", "md", "tex"],
-          code: ["js", "ts", "tsx", "jsx", "py", "java", "cpp", "c", "h", "go", "rs", "rb", "php", "html", "css", "scss", "json", "xml", "yaml", "yml"],
-        };
-        let requestedExts: string[] | null = null;
-        for (const [phrase, exts] of Object.entries(extFromPhrase)) {
-          if (lower.includes(phrase)) {
-            requestedExts = exts;
-            break;
-          }
-        }
-        if (!requestedExts && listIntent) {
-          if (/\bcsv\b/i.test(lower)) requestedExts = ["csv"];
-          else if (/\bpdf\b/i.test(lower)) requestedExts = ["pdf"];
-          else if (/\bexcel\b/i.test(lower) || /\bspreadsheet\b/i.test(lower)) requestedExts = ["xls", "xlsx", "csv", "tsv"];
-          else if (/\bimage\b/i.test(lower)) requestedExts = ["jpg", "jpeg", "png", "gif", "webp"];
-        }
-        if (!noFiles && requestedExts && (listIntent || lower.includes("csv") || lower.includes("pdf") || lower.includes("excel") || lower.includes("spreadsheet") || lower.includes("image") || lower.includes("document"))) {
-          const filtered = scannedFiles.filter((f) => requestedExts!.includes(getExt(f.name)));
+        if (fileIntent.action === "list_by_type") {
+          if (noFiles) return `Scan a folder first, then I can list files by type.\n\n1. Click **"Scan a folder"** in the sidebar\n2. Select your folder\n3. Then ask again`;
+          const typeMap: Record<string, string[]> = {
+            csv: ["csv"], pdf: ["pdf"], excel: ["xls", "xlsx", "csv", "tsv"],
+            spreadsheets: ["xls", "xlsx", "csv", "tsv", "ods", "numbers"],
+            images: ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "tiff"],
+            documents: ["pdf", "doc", "docx", "txt", "rtf", "odt", "pages", "md", "tex"],
+            code: ["js", "ts", "tsx", "jsx", "py", "java", "cpp", "c", "h", "go", "rs", "rb", "php", "html", "css", "scss", "json", "xml", "yaml", "yml"],
+            audio: ["mp3", "wav", "flac", "aac", "ogg", "m4a"], video: ["mp4", "mkv", "avi", "mov", "wmv", "webm"],
+            archives: ["zip", "tar", "gz", "rar", "7z"],
+          };
+          const ft = (fileIntent.file_type || "").toLowerCase();
+          const exts = typeMap[ft] || (ft ? [ft] : null);
+          if (!exts) return analyseFiles(scannedFiles);
+          const filtered = scannedFiles.filter((f) => exts.includes(getExt(f.name)));
           if (filtered.length === 0) {
-            const typeLabel = requestedExts.length === 1 ? requestedExts[0].toUpperCase() : requestedExts.join("/").toUpperCase();
-            return `No **${typeLabel}** files found in "${scannedFolderName}". Scanned ${scannedFiles.length} file(s) total.`;
+            return `No **${ft.toUpperCase()}** files found in "${scannedFolderName}". Scanned ${scannedFiles.length} file(s) total.`;
           }
           const totalSize = filtered.reduce((s, f) => s + f.size, 0);
-          const typeLabel = requestedExts.length === 1 ? requestedExts[0].toUpperCase() : "matching";
-          let r = `**${filtered.length} ${typeLabel} file(s) in "${scannedFolderName}"** (${formatBytes(totalSize)} total):\n\n`;
-          filtered.forEach((f, i) => {
-            r += `${i + 1}. \`${f.name}\` — ${formatBytes(f.size)}\n`;
-          });
+          let r = `**${filtered.length} ${ft.toUpperCase()} file(s) in "${scannedFolderName}"** (${formatBytes(totalSize)} total):\n\n`;
+          filtered.forEach((f, i) => { r += `${i + 1}. \`${f.name}\` — ${formatBytes(f.size)}\n`; });
           return r;
         }
 
-        if (lower.includes("suggest") || lower.includes("breakdown") || lower.includes("analyse") || lower.includes("analyze")) {
+        if (fileIntent.action === "analyze" || fileIntent.action === "ask") {
+          if (noFiles) {
+            return `I can manage your local files. Start by:\n\n1. Click **"Scan a folder"** in the sidebar (or type "scan")\n2. Select any folder from your computer\n3. Then ask me anything about your files — organize, find large files, spot duplicates, archive old files, etc.\n\nAll file analysis happens in your browser. Scripts are generated for you to review and run.`;
+          }
           return analyseFiles(scannedFiles);
         }
 
         if (noFiles) {
-          const wantsList = listIntent && requestedExts;
-          return wantsList
-            ? `Scan a folder first to list ${requestedExts!.length === 1 ? requestedExts![0].toUpperCase() : "these"} files.\n\n1. Click **"Scan a folder"** in the sidebar (or type "scan")\n2. Select your folder (e.g. Downloads)\n3. Then ask again: **"List ${requestedExts!.join("/").toUpperCase()} files"**`
-            : `I can manage your local files. Start by:\n\n1. Click **"Scan a folder"** in the sidebar (or type "scan")\n2. Select any folder from your computer\n3. Then ask me to:\n   - **"List CSV files"** or **"List down the CSV files"** — show CSV files in the folder\n   - **"Organise my files"** — sorts files into categorised subfolders\n   - **"Remove large files"** — generates a delete script for big files\n   - **"Remove duplicates"** — finds and removes duplicate filenames\n   - **"Archive old files"** — moves stale files to an archive folder\n\nAll file analysis happens in your browser. Scripts are generated for you to review and run.`;
+          return `I can manage your local files. Start by:\n\n1. Click **"Scan a folder"** in the sidebar (or type "scan")\n2. Select any folder from your computer\n3. Then ask me anything — "what's taking up space?", "organize my files", "show me the PDFs", etc.`;
         }
 
         return analyseFiles(scannedFiles);
@@ -1353,7 +1432,14 @@ export default function AssistantPage() {
         if (sessions.length === 0) {
           return "No research sessions yet. Use the **Search** tab to run some research, then come back to query your findings.";
         }
-        if (lower.includes("summarise") || lower.includes("summarize") || lower.includes("summary") || lower.includes("recent")) {
+        let researchIntent = (await getIntent("research", text)) as { action: string; question?: string | null; reasoning?: string } | null;
+        if (!researchIntent) researchIntent = { action: "summarize" };
+        if (researchIntent.action === "summarize" || !researchIntent.action) {
+          if (lower.includes("finding")) researchIntent = { action: "key_findings" };
+          else if (lower.includes("compare") || lower.includes("contrast")) researchIntent = { action: "compare" };
+        }
+
+        if (researchIntent.action === "summarize") {
           const recent = sessions.slice(0, 5);
           let r = `**Your ${recent.length} most recent research sessions:**\n\n`;
           recent.forEach((s, i) => {
@@ -1363,7 +1449,8 @@ export default function AssistantPage() {
           });
           return r;
         }
-        if (lower.includes("key finding") || lower.includes("findings")) {
+
+        if (researchIntent.action === "key_findings") {
           const withEssence = sessions.filter((s) => s.metadata?.essence_text);
           if (withEssence.length === 0) return "No research essences found yet. Run more detailed searches.";
           let r = "**Key findings from your research:**\n\n";
@@ -1372,14 +1459,54 @@ export default function AssistantPage() {
           });
           return r;
         }
-        if (lower.includes("compare") || lower.includes("contrast")) {
+
+        if (researchIntent.action === "compare") {
           if (sessions.length < 2) return "Need at least 2 sessions to compare.";
+          const sessionsContext = sessions.slice(0, 6).map((s, i) => {
+            const essence = s.metadata?.essence_text ? (s.metadata.essence_text as string).slice(0, 400) : s.report?.slice(0, 400) || "No details available";
+            return `Session ${i + 1}: "${s.query}" (${new Date(s.timestamp).toLocaleDateString()})\nFindings: ${essence}`;
+          }).join("\n\n---\n\n");
+          try {
+            const chatRes = await fetch("/api/assistant/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                system: "You are a research analyst. Compare and contrast the user's research sessions. Identify common themes, differences, and connections. Be concise but insightful. Use markdown formatting.",
+                message: `${researchIntent.question || "Compare and contrast these research topics"}\n\nResearch sessions:\n\n${sessionsContext}`,
+              }),
+            });
+            if (chatRes.ok) {
+              const data = await chatRes.json();
+              if (data.response) return data.response;
+            }
+          } catch { /* fall through */ }
           const topics = sessions.slice(0, 4).map((s) => `"${s.query}"`).join(", ");
-          return `Your recent topics: ${topics}\n\nTo get AI-powered cross-topic analysis, wire the assistant to your configured LLM. The sessions and their essences will be sent as context.`;
+          return `Your recent topics: ${topics}\n\nCould not generate comparison — check that an LLM API key is configured.`;
         }
-        let r = `You have **${sessions.length}** research session(s). Try:\n`;
-        r += `- **"Summarise my research"**\n- **"Key findings"**\n- **"Compare topics"**\n`;
-        return r;
+
+        if (researchIntent.action === "ask") {
+          const sessionsContext = sessions.slice(0, 6).map((s, i) => {
+            const essence = s.metadata?.essence_text ? (s.metadata.essence_text as string).slice(0, 400) : s.report?.slice(0, 400) || "No details";
+            return `Session ${i + 1}: "${s.query}" (${new Date(s.timestamp).toLocaleDateString()})\nFindings: ${essence}`;
+          }).join("\n\n---\n\n");
+          try {
+            const chatRes = await fetch("/api/assistant/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                system: "You are a research assistant. Answer the user's question based on their past research sessions. If the answer isn't in the research data, say so. Be concise and use markdown.",
+                message: `Question: "${text}"\n\nResearch sessions:\n\n${sessionsContext}`,
+              }),
+            });
+            if (chatRes.ok) {
+              const data = await chatRes.json();
+              if (data.response) return data.response;
+            }
+          } catch { /* fall through */ }
+          return `Could not answer your question — check that an LLM API key is configured.\n\nYou have **${sessions.length}** research session(s). Try **"Summarise my research"** or **"Key findings"**.`;
+        }
+
+        return `You have **${sessions.length}** research session(s). Try:\n- **"Summarise my research"**\n- **"Key findings"**\n- **"Compare topics"**\n- Or ask any question about your research!`;
       }
 
       // ---- EMAIL ----
@@ -1390,29 +1517,13 @@ export default function AssistantPage() {
 
         try {
           setEmailLoading(true);
-
-          // Use LLM to understand what the user actually wants
-          let intent: { action: string; query?: string | null; reasoning?: string } = { action: "summarize" };
-          try {
-            const intentRes = await fetch("/api/assistant/intent", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ message: text, skill: "email" }),
-            });
-            if (intentRes.ok) {
-              intent = await intentRes.json();
-            }
-          } catch {
-            // Fall back to keyword matching if intent API fails
-            if (lower.includes("clean") || lower.includes("triage") || lower.includes("newsletter")) {
-              intent = { action: "clean" };
-            } else if (lower.includes("search") || lower.includes("find")) {
-              intent = { action: "search", query: text.replace(/^(search|find)\s*(my\s*)?(inbox\s*)?(for\s*)?(emails?\s*)?(about\s*)?/i, "").trim() };
-            } else if (lower.includes("draft") || lower.includes("reply") || lower.includes("compose")) {
-              intent = { action: "draft_reply" };
-            } else if (lower.includes("list") || lower.includes("show") || lower.includes("fetch")) {
-              intent = { action: "fetch_unread" };
-            }
+          let intent = (await getIntent("email", text)) as { action: string; query?: string | null; reasoning?: string } | null;
+          if (!intent) intent = { action: "summarize" };
+          if (intent.action === "unknown" || intent.action === "summarize") {
+            if (lower.includes("clean") || lower.includes("triage") || lower.includes("newsletter")) intent = { action: "clean" };
+            else if (lower.includes("search") || lower.includes("find")) intent = { action: "search", query: text.replace(/^(search|find)\s*(my\s*)?(inbox\s*)?(for\s*)?(emails?\s*)?(about\s*)?/i, "").trim() };
+            else if (lower.includes("draft") || lower.includes("reply") || lower.includes("compose")) intent = { action: "draft_reply" };
+            else if (lower.includes("list") || lower.includes("show") || lower.includes("fetch")) intent = { action: "fetch_unread" };
           }
 
           if (intent.action === "fetch_unread") {
@@ -1438,8 +1549,10 @@ export default function AssistantPage() {
           if (intent.action === "search") {
             const searchQuery = intent.query || text.replace(/^(search|find)\s*(my\s*)?(inbox\s*)?(for\s*)?(emails?\s*)?(about\s*)?/i, "").trim();
             if (!searchQuery) return "What would you like to search for? Try **\"Search for emails about project deadline\"**";
-            const data = await callEmailApi("search", searchQuery);
+            const data = await callEmailApi("search", searchQuery, text);
             if (!data.emails || data.emails.length === 0) return `No emails found matching: **"${searchQuery}"**`;
+            // If LLM provided a summary, use it for a richer response
+            if (data.summary) return data.summary;
             let r = `**Found ${data.emails.length} email(s) matching "${searchQuery}":**\n\n`;
             data.emails.forEach((e: { from: string; subject: string; date: string; snippet: string }, i: number) => {
               r += `${i + 1}. **${e.subject || "(no subject)"}**\n   From: ${e.from} — ${e.date}\n   > ${e.snippet?.slice(0, 100)}...\n\n`;
@@ -1447,12 +1560,17 @@ export default function AssistantPage() {
             return r;
           }
 
+          if (intent.action === "ask") {
+            const data = await callEmailApi("ask", undefined, text);
+            return data.summary || "I couldn't find relevant information in your emails.";
+          }
+
           if (intent.action === "draft_reply") {
             return `Draft/reply functionality requires write access to Gmail. Currently the integration uses **read-only** access for security.\n\nTo enable drafting, add the \`gmail.compose\` scope and implement the compose endpoint.`;
           }
 
           // "unknown" or unrecognized intent
-          return `I'm not sure how to do that with email yet. I can:\n- **Summarise** your unread emails\n- **Search** for specific emails (e.g. "find emails from John")\n- **Clean** your inbox by categorising emails\n- **List** your unread messages\n\nWhat would you like to do?`;
+          return `I'm not sure how to do that with email yet. I can:\n- **Summarise** your unread emails\n- **Search** for specific emails (e.g. "find emails from John")\n- **Ask** questions about your emails (e.g. "did anyone email about the meeting?")\n- **Clean** your inbox by categorising emails\n- **List** your unread messages\n\nWhat would you like to do?`;
         } catch (e) {
           const msg = e instanceof Error ? e.message : "Email API error";
           if (msg.includes("expired") || msg.includes("reconnect")) {
@@ -1469,7 +1587,7 @@ export default function AssistantPage() {
       const fallbackSkill = activeSkill as SkillId;
       return `I'm not sure how to handle that for **${SKILL_DEFINITIONS[fallbackSkill].label}**. Try one of the quick actions in the sidebar.`;
     },
-    [activeSkill, tasks, events, sessions, scannedFiles, scannedFolderName, skillConnections, gmailTokens, gcalTokens, executorAvailable, addTask, toggleTask, clearCompletedTasks, addEvent, deleteEvent, triggerFolderScan, analyseFiles, callEmailApi, callCalendarApi]
+    [activeSkill, tasks, events, sessions, scannedFiles, scannedFolderName, skillConnections, gmailTokens, gcalTokens, executorAvailable, addTask, toggleTask, clearCompletedTasks, addEvent, deleteEvent, triggerFolderScan, analyseFiles, callEmailApi, callCalendarApi, getIntent, subscribeApprovalEvents]
   );
 
   // --- Send message ---
@@ -1803,10 +1921,27 @@ export default function AssistantPage() {
                   ) : (
                     <span className="flex items-center gap-1"><span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-500" /> Setup required</span>
                   )}
+                  {lastHeartbeatAt != null && (
+                    <span className={`ml-2 ${isDark ? "text-slate-600" : "text-slate-400"}`}>
+                      · Heartbeat {lastHeartbeatAt > 0 ? `${Math.round((Date.now() - lastHeartbeatAt) / 60000)}m ago` : "—"}
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
           </div>
+
+          {heartbeatAlert && !heartbeatDismissed && (
+            <div className={`mx-4 mt-2 flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm ${isDark ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-amber-300 bg-amber-50 text-amber-800"}`}>
+              <span className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                {heartbeatAlert}
+              </span>
+              <button onClick={() => setHeartbeatDismissed(true)} className={`shrink-0 rounded p-1 transition ${isDark ? "hover:bg-amber-500/20" : "hover:bg-amber-200/50"}`} aria-label="Dismiss">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-5 py-4">
@@ -1894,8 +2029,25 @@ function EmptyState({ skill, isDark, onQuickAction, scannedCount }: { skill: Ski
       <h3 className={`mb-2 text-lg font-semibold ${isDark ? "text-slate-200" : "text-slate-800"}`}>{skill.label} Assistant</h3>
       <p className={`mb-6 max-w-md text-sm leading-relaxed ${isDark ? "text-slate-400" : "text-slate-500"}`}>{descriptions[skill.id]}</p>
       {!skill.connected && (
-        <div className={`mb-6 flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm ${isDark ? "border-amber-500/30 bg-amber-500/5 text-amber-400" : "border-amber-300 bg-amber-50 text-amber-600"}`}>
-          <AlertCircle className="h-4 w-4 shrink-0" /> Connect your {skill.label.toLowerCase()} provider to enable this skill
+        <div className={`mb-6 flex flex-col gap-2 rounded-xl border px-4 py-2.5 text-sm text-left ${isDark ? "border-amber-500/30 bg-amber-500/5 text-amber-400" : "border-amber-300 bg-amber-50 text-amber-600"}`}>
+          {skill.id === "actions" ? (
+            <>
+              <span className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                Start the executor to enable real actions
+              </span>
+              <p className="text-xs mt-1 opacity-90">
+                Run in a terminal: <code className={`rounded px-1 py-0.5 ${isDark ? "bg-slate-800" : "bg-slate-200"}`}>cd executor-rust && cargo run</code>
+                <br />
+                The executor listens on <code className={`rounded px-1 py-0.5 ${isDark ? "bg-slate-800" : "bg-slate-200"}`}>127.0.0.1:7777</code>. With Docker, the executor service runs automatically.
+              </p>
+            </>
+          ) : (
+            <span className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              Connect your {skill.label.toLowerCase()} provider to enable this skill
+            </span>
+          )}
         </div>
       )}
       <div className="flex flex-wrap justify-center gap-2">

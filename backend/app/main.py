@@ -59,7 +59,7 @@ from app.kb_schemas import (
     UploadResponse, RAGQueryRequest, RAGResponse,
 )
 from app.models.inception_client import InceptionLLMClient, InceptionConfig, ChatMessage
-from app.assistant_agent import act as run_assistant_act
+from app.assistant_agent import act as run_assistant_act, run_heartbeat as assistant_heartbeat
 from app.executor_client import (
     approval_respond,
     events_stream_url,
@@ -590,6 +590,29 @@ async def assistant_approve(body: AssistantApproveRequest):
     except Exception as e:
         logger.exception("assistant approve failed: %s", e)
         raise HTTPException(status_code=500, detail=_sanitize_error(str(e)))
+
+
+class AssistantHeartbeatRequest(BaseModel):
+    """Context sent by the client for heartbeat (pending_tasks, events_today, etc.)."""
+    context: dict | None = None
+    model_id: str = Field(default_factory=lambda: os.getenv("DEFAULT_MODEL_PROVIDER", "openai"))
+
+
+@app.post("/api/assistant/heartbeat")
+async def assistant_heartbeat_route(body: AssistantHeartbeatRequest):
+    """
+    Run an autonomous heartbeat check (OpenClaw-style).
+    Client sends context (e.g. pending_tasks, events_today); LLM decides if user needs an alert.
+    Returns { status: "ok" | "alert", message?: str }.
+    """
+    try:
+        return await assistant_heartbeat(
+            context=body.context,
+            model_id=body.model_id,
+        )
+    except Exception as e:
+        logger.exception("assistant heartbeat failed: %s", e)
+        return {"status": "ok"}  # Fail open
 
 
 @app.get("/api/assistant/runs/{run_id}/events")

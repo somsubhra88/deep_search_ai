@@ -107,6 +107,8 @@ A multi-skill assistant that can take real actions on your computer via a local 
 4. Destructive actions (R2/R3) trigger an approval prompt in the UI
 5. Results stream back via SSE with undo support
 
+A **heartbeat** runs periodically (e.g. every 30 minutes); the LLM can surface alerts (e.g. many pending tasks, upcoming events) so the assistant feels proactive when the executor and skills are connected.
+
 ### 🧠 Agentic Features
 
 - **Self-Reflection** — Critic agent evaluates report quality and triggers refinement
@@ -202,7 +204,7 @@ All settings are in `.env`. See `.env.example` for the full list with comments.
 | `SSL_VERIFY` | No | `true` | Set `false` for corporate proxies |
 | `BACKEND_PORT` | No | `8000` | Backend port (Docker) |
 | `FRONTEND_PORT` | No | `3000` | Frontend port (Docker) |
-| `EXECUTOR_URL` | No | `http://127.0.0.1:7777` | Rust executor URL for Assistant actions |
+| `EXECUTOR_URL` | No | `http://127.0.0.1:7777` | Rust executor URL. With Docker Compose, the backend uses `http://executor:7777` automatically. |
 
 ---
 
@@ -237,7 +239,7 @@ deep-search-agent/
 │   ├── src/app/
 │   │   ├── assistant/page.tsx     # Multi-skill assistant UI
 │   │   ├── search/page.tsx        # Research UI
-│   │   └── api/assistant/         # API route proxies (act, approve, status, events)
+│   │   └── api/assistant/         # API route proxies (act, approve, status, heartbeat, events)
 │   └── Dockerfile
 ├── docker-compose.yml
 ├── Makefile
@@ -316,6 +318,7 @@ Streams research progress via Server-Sent Events.
 | `GET` | `/api/assistant/status` | Check if the Rust executor is available |
 | `POST` | `/api/assistant/act` | Execute an action from a natural-language message |
 | `POST` | `/api/assistant/approve` | Approve or deny a pending destructive action |
+| `POST` | `/api/assistant/heartbeat` | Autonomous heartbeat check (context: tasks, calendar, etc.; returns ok or alert) |
 | `GET` | `/api/assistant/runs/{run_id}/events` | SSE stream for run events (approval prompts, results) |
 
 **Act request:**
@@ -332,7 +335,12 @@ Streams research progress via Server-Sent Events.
 
 ### Executor (Rust)
 
-The executor runs on `127.0.0.1:7777` (local) or `executor:7777` (Docker) and provides:
+The executor is a separate service that the backend calls for Assistant **Actions** (file ops, notes, shell, clipboard).
+
+- **Docker**: Runs as the `executor` service, listens on `0.0.0.0:7777` so the backend container can reach it at `http://executor:7777`. Started automatically with `make start` / `docker compose up`.
+- **Local**: Run `cd executor-rust && cargo run`. It binds to `127.0.0.1:7777` by default. Set `HOST=0.0.0.0` to listen on all interfaces; set `PORT` to use a different port.
+
+The executor provides:
 
 - **16 tools** with workspace sandbox enforcement
 - **Policy engine** — R0-R3 risk classification, rule-based auto-allow/deny
@@ -349,9 +357,13 @@ The Assistant is available at `/assistant` in the web UI. It provides six skills
 
 ### Getting started
 
-1. **Start the stack**: `make start` (Docker) or run backend + frontend + executor separately
-2. Navigate to **http://localhost:3000/assistant**
-3. Select a skill from the sidebar and start chatting
+1. **Start the stack**
+   - **Docker (recommended)**: `make start` or `docker compose up --build`. The backend, frontend, and **Rust executor** all start; the Actions skill will show as connected once the executor is ready.
+   - **Local**: Start the backend and frontend, then start the executor so Actions work: `cd executor-rust && cargo run` (listens on `127.0.0.1:7777`).
+2. Navigate to **http://localhost:3000/assistant** (or the port set by `FRONTEND_PORT` in Docker).
+3. Select a skill from the sidebar and start chatting.
+
+If the **Actions** skill shows “Start the executor to enable real actions”, the backend cannot reach the executor. With Docker, ensure all services are up; locally, run the executor in a separate terminal.
 
 ### Files & Folders skill
 
@@ -366,13 +378,14 @@ The Assistant is available at `/assistant` in the web UI. It provides six skills
 
 ### Actions skill (requires executor)
 
-The Actions skill connects to the Rust executor for real operations:
+The Actions skill runs real operations (files, notes, shell, clipboard) via the **Rust executor**.
 
-```
-cd executor-rust && cargo run    # Start executor locally
-```
-
-Or via Docker (`make start` handles this automatically).
+- **With Docker**: The executor runs as a service; no extra step. The UI shows “Ready” when it’s connected.
+- **Local (no Docker)**: In a separate terminal run:
+  ```bash
+  cd executor-rust && cargo run
+  ```
+  The executor listens on `127.0.0.1:7777`. The backend uses `EXECUTOR_URL` (default `http://127.0.0.1:7777`).
 
 Example commands:
 - "List files in ~/Downloads"

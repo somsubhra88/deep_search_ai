@@ -69,7 +69,7 @@ function formatEventDate(event: CalendarEvent): string {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, access_token, refresh_token, event_data, query } = body as {
+    const { action, access_token, refresh_token, event_data, query, timezone } = body as {
       action: string;
       access_token: string;
       refresh_token?: string;
@@ -81,6 +81,7 @@ export async function POST(req: NextRequest) {
         description?: string;
       };
       query?: string;
+      timezone?: string;
     };
 
     if (!access_token) {
@@ -178,55 +179,63 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: "Event title is required" }, { status: 400 });
         }
 
-        const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-        let startDateTime: string;
-        let endDateTime: string;
-        let isAllDay = false;
+        // Use the user's timezone from the frontend, not the server's
+        const userTimeZone = timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+        // Google Calendar API accepts RFC3339 dateTime WITH timezone offset,
+        // OR a dateTime string + separate timeZone field.
+        // Using the timeZone field approach: send "YYYY-MM-DDTHH:MM:SS" (no Z, no offset)
+        // and let Google interpret it in the specified timeZone.
+        let eventBody: Record<string, unknown>;
 
         if (event_data.time) {
-          // Normalize time to HH:MM:SS — handle "15:00", "15:00:00", "3pm", etc.
           let normalizedTime = event_data.time.trim();
+          // Normalize to HH:MM format
+          if (/^\d{1,2}:\d{2}:\d{2}$/.test(normalizedTime)) {
+            normalizedTime = normalizedTime.slice(0, 5);
+          }
           if (/^\d{1,2}:\d{2}$/.test(normalizedTime)) {
-            normalizedTime = normalizedTime + ":00";
-          } else if (/^\d{1,2}:\d{2}:\d{2}$/.test(normalizedTime)) {
-            // already has seconds
-          } else {
-            // Try to parse as best we can
-            normalizedTime = normalizedTime.replace(/\s+/g, "") + ":00";
+            const [h, m] = normalizedTime.split(":");
+            normalizedTime = `${h.padStart(2, "0")}:${m}`;
           }
-          // Ensure hours are zero-padded
-          if (/^\d:\d{2}:\d{2}$/.test(normalizedTime)) {
-            normalizedTime = "0" + normalizedTime;
+          // Validate the time
+          const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+          if (!timeRegex.test(normalizedTime)) {
+            return NextResponse.json(
+              { error: `Invalid time format: "${event_data.time}". Expected HH:MM (e.g. "14:30").` },
+              { status: 400 }
+            );
           }
-          startDateTime = `${event_data.date}T${normalizedTime}`;
-          const durationMs = (event_data.duration || 60) * 60 * 1000;
-          const startDate = new Date(startDateTime);
-          if (isNaN(startDate.getTime())) {
-            return NextResponse.json({ error: `Invalid time format: "${event_data.time}". Use HH:MM (e.g. "14:30").` }, { status: 400 });
-          }
-          endDateTime = new Date(startDate.getTime() + durationMs).toISOString();
-          startDateTime = startDate.toISOString();
-        } else {
-          isAllDay = true;
-          startDateTime = event_data.date;
-          const nextDay = new Date(event_data.date);
-          nextDay.setDate(nextDay.getDate() + 1);
-          endDateTime = nextDay.toISOString().slice(0, 10);
-        }
 
-        const eventBody = isAllDay
-          ? {
-              summary: event_data.title,
-              description: event_data.description,
-              start: { date: startDateTime },
-              end: { date: endDateTime },
-            }
-          : {
-              summary: event_data.title,
-              description: event_data.description,
-              start: { dateTime: startDateTime, timeZone },
-              end: { dateTime: endDateTime, timeZone },
-            };
+          // Build local datetime strings WITHOUT converting to UTC
+          // Google Calendar will interpret these in the provided timeZone
+          const startLocal = `${event_data.date}T${normalizedTime}:00`;
+          const durationMin = event_data.duration || 60;
+          // Calculate end time by adding duration to hours/minutes directly
+          const [startH, startM] = normalizedTime.split(":").map(Number);
+          const totalMinutes = startH * 60 + startM + durationMin;
+          const endH = Math.floor(totalMinutes / 60) % 24;
+          const endM = totalMinutes % 60;
+          const endLocal = `${event_data.date}T${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}:00`;
+
+          eventBody = {
+            summary: event_data.title,
+            description: event_data.description || undefined,
+            start: { dateTime: startLocal, timeZone: userTimeZone },
+            end: { dateTime: endLocal, timeZone: userTimeZone },
+          };
+        } else {
+          const nextDay = new Date(event_data.date + "T12:00:00Z");
+          nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+          const endDate = nextDay.toISOString().slice(0, 10);
+
+          eventBody = {
+            summary: event_data.title,
+            description: event_data.description || undefined,
+            start: { date: event_data.date },
+            end: { date: endDate },
+          };
+        }
 
         const created = await calendarFetch<CalendarEvent>(
           "calendars/primary/events",

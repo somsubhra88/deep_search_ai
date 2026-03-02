@@ -20,6 +20,8 @@ services:
       - "7777:7777"
     environment:
       - HOME=${HOME:-/tmp}
+      - HOST=0.0.0.0
+      - PORT=7777
     volumes:
       - ${HOME:-/tmp}:${HOME:-/tmp}:rw
     restart: unless-stopped

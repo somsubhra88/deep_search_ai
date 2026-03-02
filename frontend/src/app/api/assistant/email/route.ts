@@ -82,11 +82,12 @@ async function refreshAccessToken(refreshToken: string): Promise<{ access_token:
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { action, access_token, refresh_token, query } = body as {
+    const { action, access_token, refresh_token, query, user_message } = body as {
       action: string;
       access_token: string;
       refresh_token?: string;
       query?: string;
+      user_message?: string;
     };
 
     if (!access_token) {
@@ -251,7 +252,7 @@ export async function POST(req: NextRequest) {
 
         const details = await Promise.all(
           messageIds.map((m) =>
-            gmailFetch<GmailMessageDetail>(`messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`, token)
+            gmailFetch<GmailMessageDetail>(`messages/${m.id}?format=full`, token)
           )
         );
 
@@ -261,11 +262,71 @@ export async function POST(req: NextRequest) {
           subject: getHeader(msg, "Subject"),
           date: getHeader(msg, "Date"),
           snippet: msg.snippet,
+          body: extractBody(msg).slice(0, 400),
         }));
+
+        // Use LLM to provide an intelligent summary of search results
+        let summary: string | undefined;
+        if (user_message && emails.length > 0) {
+          try {
+            const emailContext = emails
+              .map((e, i) => `Email ${i + 1}:\nFrom: ${e.from}\nSubject: ${e.subject}\nDate: ${e.date}\nBody: ${e.body}\n`)
+              .join("\n---\n");
+            summary = await chatCompletion(
+              `You are an email assistant. The user searched their inbox and found the emails below. Answer the user's question based on these emails. Be concise and helpful. Use markdown formatting.`,
+              `User's request: "${user_message}"\n\nSearch results (${emails.length} emails):\n\n${emailContext}`
+            );
+          } catch {
+            // LLM summary failed, return raw results
+          }
+        }
 
         return NextResponse.json({
           emails,
           count: emails.length,
+          summary,
+          new_token: token !== access_token ? token : undefined,
+        });
+      }
+
+      case "ask": {
+        // General email question — fetch recent emails and let LLM answer
+        const list = await gmailFetch<{ messages?: GmailMessage[] }>(
+          "messages?maxResults=15",
+          token
+        );
+        const messageIds = list.messages || [];
+        if (messageIds.length === 0) {
+          return NextResponse.json({
+            summary: "Your inbox appears to be empty.",
+            new_token: token !== access_token ? token : undefined,
+          });
+        }
+
+        const details = await Promise.all(
+          messageIds.slice(0, 15).map((m) =>
+            gmailFetch<GmailMessageDetail>(`messages/${m.id}?format=full`, token)
+          )
+        );
+
+        const emailContext = details
+          .map((msg, i) => {
+            const from = getHeader(msg, "From");
+            const subject = getHeader(msg, "Subject");
+            const date = getHeader(msg, "Date");
+            const body = extractBody(msg).slice(0, 300);
+            return `Email ${i + 1}:\nFrom: ${from}\nSubject: ${subject}\nDate: ${date}\nLabels: ${msg.labelIds?.join(", ") || "none"}\nBody: ${body}\n`;
+          })
+          .join("\n---\n");
+
+        const answer = await chatCompletion(
+          `You are an email assistant with access to the user's recent emails. Answer the user's question based on the email data provided. If the question cannot be answered from the available emails, say so. Be concise, specific, and use markdown formatting.`,
+          `User's question: "${user_message || query || "Tell me about my emails"}"\n\nRecent emails (${details.length}):\n\n${emailContext}`
+        );
+
+        return NextResponse.json({
+          summary: answer,
+          count: details.length,
           new_token: token !== access_token ? token : undefined,
         });
       }
