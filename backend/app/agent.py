@@ -34,6 +34,14 @@ from app.rag.ephemeral_store import InMemoryVectorStore
 from app.rerank.bm25 import BM25Reranker
 from app.models.router import ModelRouter, ModelCascadeConfig
 from app.schemas.evidence import EvidenceConfig, get_evidence_config
+from app.schemas.explain import (
+    CacheDecision,
+    ExplainPayload,
+    GenerationExplain,
+    RetrievalExplain,
+    SafetyExplain,
+    TopSource,
+)
 
 import pathlib
 _base = pathlib.Path(__file__).resolve().parents[2]
@@ -1256,6 +1264,65 @@ def _merge_mode_configs(modes: list[str]) -> dict:
     return merged
 
 
+def _build_research_explain(
+    metadata: dict,
+    mode_cfg: dict,
+    model_id: str,
+    model_label: str,
+    active_modes: list[str],
+) -> dict:
+    """Build structured explain payload for research complete event. No prompts or secrets."""
+    cache_decision = None
+    token_usage = metadata.get("token_usage") or {}
+    cache_stats = token_usage.get("cache_stats") or {}
+    if cache_stats:
+        hits = int(cache_stats.get("hits", 0))
+        misses = int(cache_stats.get("misses", 0))
+        hit_rate = str(cache_stats.get("hit_rate", ""))
+        cache_decision = CacheDecision(
+            hit=(hits > 0),
+            kind="search",
+            hits=hits,
+            misses=misses,
+            hit_rate=hit_rate,
+            why="Search results cache hit." if hits > 0 else "Search results fetched live.",
+        )
+
+    top_sources = []
+    for s in (metadata.get("sources") or [])[:15]:
+        top_sources.append(TopSource(
+            title=(s.get("title") or "")[:200],
+            url=s.get("url", ""),
+            score=None,
+        ))
+    why_sources = f"Top {len(top_sources)} sources from web search (mode: {', '.join(active_modes)})."
+    retrieval = RetrievalExplain(
+        sources_considered_count=len(metadata.get("sources") or []),
+        top_sources=top_sources,
+        retrieval_params={
+            "max_sources": mode_cfg.get("sources", 10),
+            "modes": active_modes,
+        },
+        why_these_sources=why_sources[:500],
+    )
+
+    total_tokens = token_usage.get("total_tokens")
+    generation = GenerationExplain(
+        model=metadata.get("model_used", model_label),
+        provider=model_id,
+        prompt_version="1",
+        max_tokens=total_tokens,
+    )
+
+    payload = ExplainPayload(
+        cache_decision=cache_decision,
+        retrieval=retrieval,
+        generation=generation,
+        safety=None,
+    )
+    return payload.model_dump()
+
+
 async def run_research_agent(
     query: str,
     use_snippets_only: bool = False,
@@ -1575,7 +1642,12 @@ Instructions:{mode_instructions}{safe_instruction}"""
         metadata["essence_text"] = essence_text
         metadata["recalled_memories"] = recalled_memories or []
 
-        yield await _emit_step("complete", "Report ready", {"report": report_content, "metadata": metadata})
+        explain = _build_research_explain(metadata, mode_cfg, model_id, model_label, active_modes)
+        yield await _emit_step(
+            "complete",
+            "Report ready",
+            {"report": report_content, "metadata": metadata, "explain": explain},
+        )
 
     except Exception as e:
         err_detail = f"[{step_ctx}] {type(e).__name__}: {str(e)}"

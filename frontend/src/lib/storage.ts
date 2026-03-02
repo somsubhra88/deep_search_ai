@@ -6,6 +6,44 @@ export const MAX_SESSIONS = 10;
 export const SETUP_KEY = "deep-search-setup";
 export const RESEARCH_HISTORY_KEY = "deep-search-research-history";
 export const MAX_RESEARCH_HISTORY = 50;
+export const BRIDGE_PINNED_KEY = "deep-search-bridge-pinned";
+export const EXPLAIN_MODE_KEY = "deep-search-explain-mode";
+export const ACTIVE_REPORT_KEY = "deep-search-active-report";
+export const ACTIVE_CHAT_KEY = "deep-search-active-chat";
+export const MAX_PERSISTED_MESSAGES = 100;
+
+export type ActiveReport = {
+  query: string;
+  report: string;
+  metadata: Record<string, unknown> | null;
+  searchId: string | null;
+  essenceText: string | null;
+  recalledMemories: Array<{ query: string; essence: string; timestamp: string; similarity: number }>;
+  explain: Record<string, unknown> | null;
+  bridgeSuggestions: unknown[];
+};
+
+export function saveActiveReport(data: ActiveReport) {
+  try {
+    sessionStorage.setItem(ACTIVE_REPORT_KEY, JSON.stringify(data));
+  } catch { /* quota */ }
+}
+
+export function loadActiveReport(): ActiveReport | null {
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_REPORT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as ActiveReport;
+  } catch {
+    return null;
+  }
+}
+
+export function clearActiveReport() {
+  try {
+    sessionStorage.removeItem(ACTIVE_REPORT_KEY);
+  } catch { /* ignore */ }
+}
 
 export type Session = {
   id: string;
@@ -67,6 +105,45 @@ export function addResearchHistoryEntry(entry: Omit<ResearchHistoryEntry, "id" |
   const deduped = [newEntry, ...existing.filter((e) => e.query !== entry.query)].slice(0, MAX_RESEARCH_HISTORY);
   compressAndStore(RESEARCH_HISTORY_KEY, deduped);
   return deduped;
+}
+
+export type ActiveChat = {
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    timestamp: number;
+    skill?: string;
+    action?: { type: string; label: string };
+    explain?: Record<string, unknown> | null;
+  }>;
+  activePersonaId: string | null;
+};
+
+export function saveActiveChat(data: ActiveChat) {
+  try {
+    const trimmed = {
+      ...data,
+      messages: data.messages.slice(-MAX_PERSISTED_MESSAGES),
+    };
+    sessionStorage.setItem(ACTIVE_CHAT_KEY, JSON.stringify(trimmed));
+  } catch { /* quota */ }
+}
+
+export function loadActiveChat(): ActiveChat | null {
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_CHAT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as ActiveChat;
+  } catch {
+    return null;
+  }
+}
+
+export function clearActiveChat() {
+  try {
+    sessionStorage.removeItem(ACTIVE_CHAT_KEY);
+  } catch { /* ignore */ }
 }
 
 export function clearAllSearchHistory() {

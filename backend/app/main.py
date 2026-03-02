@@ -65,6 +65,9 @@ from app.executor_client import (
     events_stream_url,
     is_executor_available,
 )
+from app.personas import get_personas_config
+from app.schemas.assistant import PersonaDefinition, SearchRecordRequest, ActionSuggestion
+from app.search_bridge import save_search_run, get_search_run, generate_action_suggestions
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -529,6 +532,47 @@ async def research(request: Request, body: ResearchRequest):
 
 
 # ---------------------------------------------------------------------------
+# Search → Assistant Bridge
+# ---------------------------------------------------------------------------
+
+@app.post("/api/search/record")
+async def search_record(body: SearchRecordRequest):
+    """Store minimal search run for bridge and assistant reference."""
+    save_search_run(
+        search_id=body.id,
+        query=body.query,
+        created_at=body.created_at,
+        mode=body.mode,
+        provider=body.provider,
+        model=body.model,
+        perspective=body.perspective,
+        citations=body.citations,
+        summary_snippet=body.summary_snippet,
+    )
+    return {"status": "ok", "search_id": body.id}
+
+
+class ActionSuggestionsRequest(BaseModel):
+    perspective_dial: int = Field(default=50, ge=0, le=100)
+    modes: list[str] = Field(default_factory=list)
+    model_id: str = Field(default_factory=lambda: os.getenv("DEFAULT_MODEL_PROVIDER", "openai"))
+
+
+@app.post("/api/search/{search_id}/action_suggestions", response_model=list[ActionSuggestion])
+async def action_suggestions(search_id: str, body: ActionSuggestionsRequest):
+    """Generate 4–8 context-aware action suggestions for this search run (LLM, no hardcoded list)."""
+    if not get_search_run(search_id):
+        raise HTTPException(status_code=404, detail="Search run not found")
+    suggestions = await generate_action_suggestions(
+        search_id=search_id,
+        perspective_dial=body.perspective_dial,
+        modes=body.modes or [],
+        model_id=body.model_id,
+    )
+    return [ActionSuggestion(**s) for s in suggestions]
+
+
+# ---------------------------------------------------------------------------
 # Assistant Actions (executor-backed, real actions)
 # ---------------------------------------------------------------------------
 
@@ -537,6 +581,8 @@ class AssistantActRequest(BaseModel):
     run_id: str | None = None
     context: dict | None = None
     model_id: str = Field(default_factory=lambda: os.getenv("DEFAULT_MODEL_PROVIDER", "openai"))
+    persona_id: str | None = Field(None, description="Active persona; influences system prompt and tool priority")
+    selected_context_ids: list[str] | None = Field(None, description="Optional context refs (e.g. session ids) to include")
 
 
 class AssistantApproveRequest(BaseModel):
@@ -551,12 +597,61 @@ async def assistant_status():
     return {"executor_available": is_executor_available()}
 
 
+@app.get("/api/assistant/personas", response_model=list[PersonaDefinition])
+async def assistant_personas(
+    email_connected: bool = False,
+    calendar_connected: bool = False,
+):
+    """
+    Return persona definitions with status. Frontend renders sidebar from this only.
+    Status is computed from backend executor and optional connector query params.
+    """
+    executor_available = is_executor_available()
+    # Optional: allow query params from query string (e.g. ?email_connected=true)
+    # Query params are already parsed above
+    personas_raw = get_personas_config()
+    result: list[PersonaDefinition] = []
+    for p in personas_raw:
+        requires = p.get("requires_setup") or []
+        caps = p.get("capabilities") or []
+        if not requires:
+            if "actions" in caps and not executor_available:
+                status = "needs_setup"
+            else:
+                status = "ready"
+        else:
+            need_email = "email" in requires
+            need_calendar = "calendar" in requires
+            if need_email and need_calendar:
+                status = "connected" if (email_connected and calendar_connected) else "needs_setup"
+            elif need_email:
+                status = "connected" if email_connected else "needs_setup"
+            elif need_calendar:
+                status = "connected" if calendar_connected else "needs_setup"
+            else:
+                status = "ready"
+        result.append(
+            PersonaDefinition(
+                persona_id=p["persona_id"],
+                display_name=p["display_name"],
+                icon_key=p["icon_key"],
+                description=p["description"],
+                example_prompts=p.get("example_prompts") or [],
+                capabilities=p.get("capabilities") or [],
+                requires_setup=requires,
+                status=status,
+                last_activity_at=None,
+            )
+        )
+    return result
+
+
 @app.post("/api/assistant/act")
 async def assistant_act(body: AssistantActRequest):
     """
     Take real action based on user message.
     Uses LLM to pick tool, executes via local executor.
-    For destructive actions (delete, shell, download), executor may require approval.
+    Persona influences system prompt and tool priority.
     """
     run_id = body.run_id or str(uuid.uuid4())
     try:
@@ -565,6 +660,8 @@ async def assistant_act(body: AssistantActRequest):
             run_id=run_id,
             context=body.context,
             model_id=body.model_id,
+            persona_id=body.persona_id,
+            selected_context_ids=body.selected_context_ids,
         )
         return result
     except Exception as e:

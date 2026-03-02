@@ -1,4 +1,7 @@
 @import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+@plugin "@tailwindcss/typography";
 
 :root {
   --background: #0f172a;
@@ -102,3 +105,37 @@ input[type="range"].perspective-slider::-moz-range-thumb {
 .swarm-node-d4 { animation-delay: 1.1s; }
 .swarm-node-d5 { animation-delay: 1.3s; }
 .swarm-node-d6 { animation-delay: 1.5s; }
+
+/* ── Report Viewer ── */
+
+.report-viewer .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.5rem 0;
+}
+
+.report-viewer table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.report-viewer pre {
+  overflow-x: auto;
+}
+
+.report-viewer .mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+@media print {
+  .report-viewer-toolbar,
+  .report-viewer-raw-pane {
+    display: none !important;
+  }
+  .report-viewer {
+    border: none !important;
+    box-shadow: none !important;
+  }
+}

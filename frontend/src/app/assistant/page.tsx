@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   Send,
   Brain,
@@ -25,6 +26,9 @@ import {
   AlertCircle,
   FolderSearch,
   Upload,
+  HelpCircle,
+  ExternalLink,
+  ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTheme } from "@/context/ThemeContext";
@@ -32,6 +36,9 @@ import {
   loadFromStorage,
   compressAndStore,
   clearAllSearchHistory,
+  saveActiveChat,
+  loadActiveChat,
+  clearActiveChat,
   SESSIONS_KEY,
 } from "@/lib/storage";
 import ClearHistoryModal from "@/components/ClearHistoryModal";
@@ -56,6 +63,29 @@ type GCalTokens = {
 // ---------------------------------------------------------------------------
 
 type SkillId = "email" | "files" | "calendar" | "tasks" | "research" | "actions";
+
+/** Persona from GET /api/assistant/personas — no hardcoded list in UI */
+type Persona = {
+  persona_id: string;
+  display_name: string;
+  icon_key: string;
+  description: string;
+  example_prompts: string[];
+  capabilities: string[];
+  requires_setup: string[];
+  status: "ready" | "needs_setup" | "connected";
+  last_activity_at: string | null;
+};
+
+/** Map persona_id to legacy skill id for processMessage branching and connectors */
+const PERSONA_ID_TO_SKILL: Record<string, SkillId> = {
+  research_analyst: "research",
+  digital_archivist: "files",
+  inbox_guardian: "email",
+  time_strategist: "calendar",
+  documentation_assistant: "tasks",
+  fact_checker: "actions",
+};
 
 type SkillConfig = {
   id: SkillId;
@@ -94,6 +124,19 @@ type ScannedFile = {
   lastModified: number;
 };
 
+/** Structured explain payload (from backend). Safe: no prompts or secrets. */
+type ExplainPayload = {
+  cache_decision?: { hit: boolean; kind: string; hits?: number; misses?: number; hit_rate?: string; why?: string } | null;
+  retrieval?: {
+    sources_considered_count: number;
+    top_sources: Array<{ title: string; url?: string; doc_id?: string; score?: number | null }>;
+    retrieval_params: Record<string, unknown>;
+    why_these_sources?: string;
+  } | null;
+  generation?: { model?: string; provider?: string; prompt_version?: string; temperature?: number; max_tokens?: number } | null;
+  safety?: { risk_level?: string | null; approvals?: unknown[]; tool_calls?: Array<{ tool: string; summary?: string }> } | null;
+};
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -101,6 +144,7 @@ type ChatMessage = {
   timestamp: number;
   skill?: SkillId;
   action?: { type: string; label: string };
+  explain?: ExplainPayload | null;
 };
 
 type Session = {
@@ -218,6 +262,29 @@ const SKILL_DEFINITIONS: Record<SkillId, Omit<SkillConfig, "connected" | "provid
 
 const SKILL_ORDER: SkillId[] = ["actions", "tasks", "email", "calendar", "files", "research"];
 
+/** Icon key (from API) → React node. Layout only; keys are backend-driven. */
+function getPersonaIcon(iconKey: string): React.ReactNode {
+  switch (iconKey) {
+    case "search": return <Search className="h-5 w-5" />;
+    case "folder": return <FolderOpen className="h-5 w-5" />;
+    case "mail": return <Mail className="h-5 w-5" />;
+    case "calendar": return <CalendarDays className="h-5 w-5" />;
+    case "list": return <ListTodo className="h-5 w-5" />;
+    case "zap": return <Zap className="h-5 w-5" />;
+    default: return <Zap className="h-5 w-5" />;
+  }
+}
+
+/** Icon key → style for cards. Theming only; keys are backend-driven. */
+const ICON_KEY_STYLE: Record<string, { gradient: string; color: string }> = {
+  search: { gradient: "from-cyan-500 to-blue-500", color: "text-cyan-400" },
+  folder: { gradient: "from-emerald-500 to-teal-500", color: "text-emerald-400" },
+  mail: { gradient: "from-blue-500 to-indigo-500", color: "text-blue-400" },
+  calendar: { gradient: "from-amber-500 to-orange-500", color: "text-amber-400" },
+  list: { gradient: "from-violet-500 to-purple-500", color: "text-violet-400" },
+  zap: { gradient: "from-amber-500 to-orange-500", color: "text-amber-400" },
+};
+
 // Shared copy for assistant responses
 const NO_FILES_SCANNED = "No files scanned yet. Use **\"Scan a folder\"** first.";
 
@@ -311,13 +378,14 @@ function categoriseFile(name: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Main Component
+// Main Component (uses useSearchParams → wrap in Suspense for Next.js)
 // ---------------------------------------------------------------------------
 
-export default function AssistantPage() {
+function AssistantPageContent() {
   const { isDark } = useTheme();
 
-  const [activeSkill, setActiveSkill] = useState<SkillId>("tasks");
+  const [personas, setPersonas] = useState<Persona[]>([]);
+  const [activePersonaId, setActivePersonaId] = useState<string | null>(null);
   const [skillConnections, setSkillConnections] = useState<SkillConnectionState>({});
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
@@ -349,6 +417,27 @@ export default function AssistantPage() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const pendingFolderResolve = useRef<((files: ScannedFile[]) => void) | null>(null);
+  const [bridgeSearchId, setBridgeSearchId] = useState<string | null>(null);
+  const [assistantExplainMode, setAssistantExplainMode] = useState(false);
+  const lastExplainRef = useRef<ExplainPayload | null>(null);
+  const bridgePreloadApplied = useRef(false);
+
+  const searchParams = useSearchParams();
+
+  // --- Preload from Search → Assistant Bridge (URL params); apply once per navigation ---
+  useEffect(() => {
+    if (bridgePreloadApplied.current) return;
+    const from = searchParams.get("from");
+    const searchId = searchParams.get("search_id");
+    const prefill = searchParams.get("prefill");
+    const personaId = searchParams.get("persona_id");
+    if (from === "search" && searchId) {
+      bridgePreloadApplied.current = true;
+      setBridgeSearchId(searchId);
+      if (prefill) setInput(prefill);
+      if (personaId) setActivePersonaId(personaId);
+    }
+  }, [searchParams]);
 
   // --- Check executor status ---
   useEffect(() => {
@@ -357,6 +446,29 @@ export default function AssistantPage() {
       .then((d) => setExecutorAvailable(d.executor_available ?? false))
       .catch(() => setExecutorAvailable(false));
   }, []);
+
+  // --- Fetch personas (backend-driven; no hardcoded list) ---
+  const fetchPersonas = useCallback(async () => {
+    const emailConnected = !!gmailTokens?.access_token;
+    const calendarConnected = !!gcalTokens?.access_token;
+    try {
+      const res = await fetch(
+        `/api/assistant/personas?email_connected=${emailConnected}&calendar_connected=${calendarConnected}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : [];
+        setPersonas(list);
+        setActivePersonaId((prev) => (prev == null && list.length > 0 ? (list as Persona[])[0].persona_id : prev));
+      }
+    } catch {
+      setPersonas([]);
+    }
+  }, [gmailTokens?.access_token, gcalTokens?.access_token]);
+
+  useEffect(() => {
+    fetchPersonas();
+  }, [fetchPersonas]);
 
   // --- Heartbeat (OpenClaw-style: periodic autonomous check) ---
   useEffect(() => {
@@ -406,6 +518,14 @@ export default function AssistantPage() {
     if (storedGcalTokens?.access_token) {
       setGcalTokens(storedGcalTokens);
     }
+    // Restore chat messages & persona from sessionStorage (survives Search ↔ Assistant navigation)
+    const savedChat = loadActiveChat();
+    if (savedChat) {
+      if (savedChat.messages?.length) setMessages(savedChat.messages as ChatMessage[]);
+      if (savedChat.activePersonaId && !bridgePreloadApplied.current) {
+        setActivePersonaId(savedChat.activePersonaId);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -422,6 +542,12 @@ export default function AssistantPage() {
     setEvents(next);
     compressAndStore(EVENTS_KEY, next);
   }, []);
+
+  // Persist chat messages & active persona to sessionStorage so they survive Search ↔ Assistant navigation
+  useEffect(() => {
+    if (messages.length === 0) return;
+    saveActiveChat({ messages, activePersonaId });
+  }, [messages, activePersonaId]);
 
   const getIntent = useCallback(async (skill: SkillId, message: string): Promise<Record<string, unknown> | null> => {
     try {
@@ -606,6 +732,7 @@ export default function AssistantPage() {
   // --- Clear all ---
   const handleClearHistory = useCallback(() => {
     clearAllSearchHistory();
+    clearActiveChat();
     setSessions([]);
     persistTasks([]);
     persistEvents([]);
@@ -646,7 +773,7 @@ export default function AssistantPage() {
 
   const startGmailOAuth = useCallback(async () => {
     setShowConnectModal(null);
-    setActiveSkill("email");
+    setActivePersonaId("inbox_guardian");
 
     try {
       const res = await fetch("/api/assistant/email/auth");
@@ -708,7 +835,7 @@ export default function AssistantPage() {
 
   const startCalendarOAuth = useCallback(async () => {
     setShowConnectModal(null);
-    setActiveSkill("calendar");
+    setActivePersonaId("time_strategist");
 
     try {
       const res = await fetch("/api/assistant/email/auth?service=calendar");
@@ -775,13 +902,33 @@ export default function AssistantPage() {
     toast.success(`${SKILL_DEFINITIONS[id].label} disconnected`);
   }, [skillConnections]);
 
-  const skills: SkillConfig[] = SKILL_ORDER.map((id) => ({
-    ...SKILL_DEFINITIONS[id],
-    connected: isConnected(id),
-    provider: skillConnections[id]?.provider,
-  }));
-
-  const currentSkill = skills.find((s) => s.id === activeSkill)!;
+  /** Legacy skill id for processMessage branching; derived from active persona */
+  const activeSkill: SkillId = (activePersonaId && PERSONA_ID_TO_SKILL[activePersonaId]) || "tasks";
+  const currentPersona = personas.find((p) => p.persona_id === activePersonaId);
+  const personaStyle = currentPersona ? ICON_KEY_STYLE[currentPersona.icon_key] || ICON_KEY_STYLE.zap : ICON_KEY_STYLE.list;
+  /** View model for header/empty state: persona data + connected flag + quick actions from schema */
+  const currentSkill: SkillConfig = currentPersona
+    ? {
+        id: activeSkill,
+        label: currentPersona.display_name,
+        description: currentPersona.description,
+        icon: getPersonaIcon(currentPersona.icon_key),
+        gradient: personaStyle.gradient,
+        color: personaStyle.color,
+        connected: currentPersona.status === "ready" || currentPersona.status === "connected",
+        provider: skillConnections[activeSkill]?.provider,
+        quickActions: currentPersona.example_prompts.map((p) => ({ label: p, prompt: p })),
+      }
+    : {
+        id: "tasks",
+        label: "Assistant",
+        description: "",
+        icon: <ListTodo className="h-5 w-5" />,
+        gradient: "from-violet-500 to-purple-500",
+        color: "text-violet-400",
+        connected: false,
+        quickActions: [],
+      };
 
   // -----------------------------------------------------------------------
   // Process message per skill
@@ -844,10 +991,16 @@ export default function AssistantPage() {
           const res = await fetch("/api/assistant/act", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: text.trim(), run_id: runId }),
+            body: JSON.stringify({
+              message: text.trim(),
+              run_id: runId,
+              persona_id: activePersonaId ?? undefined,
+              selected_context_ids: bridgeSearchId ? [bridgeSearchId] : [],
+            }),
             signal: AbortSignal.timeout(120_000),
           });
           const data = await res.json();
+          lastExplainRef.current = data.explain ?? null;
           if (data.error) {
             return `**Error:** ${data.error}`;
           }
@@ -1223,6 +1376,8 @@ export default function AssistantPage() {
                   message: `Put ${fullPath} in trash (fs_delete moves to system trash)`,
                   run_id: runId,
                   context: { path: fullPath },
+                  persona_id: activePersonaId ?? undefined,
+                  selected_context_ids: bridgeSearchId ? [bridgeSearchId] : [],
                 }),
                 signal: AbortSignal.timeout(120_000),
               });
@@ -1587,7 +1742,7 @@ export default function AssistantPage() {
       const fallbackSkill = activeSkill as SkillId;
       return `I'm not sure how to handle that for **${SKILL_DEFINITIONS[fallbackSkill].label}**. Try one of the quick actions in the sidebar.`;
     },
-    [activeSkill, tasks, events, sessions, scannedFiles, scannedFolderName, skillConnections, gmailTokens, gcalTokens, executorAvailable, addTask, toggleTask, clearCompletedTasks, addEvent, deleteEvent, triggerFolderScan, analyseFiles, callEmailApi, callCalendarApi, getIntent, subscribeApprovalEvents]
+    [activeSkill, activePersonaId, bridgeSearchId, tasks, events, sessions, scannedFiles, scannedFolderName, skillConnections, gmailTokens, gcalTokens, executorAvailable, addTask, toggleTask, clearCompletedTasks, addEvent, deleteEvent, triggerFolderScan, analyseFiles, callEmailApi, callCalendarApi, getIntent, subscribeApprovalEvents]
   );
 
   // --- Send message ---
@@ -1607,8 +1762,9 @@ export default function AssistantPage() {
       await new Promise((r) => setTimeout(r, 300 + Math.random() * 300));
     }
 
+    lastExplainRef.current = null;
     const reply = await processMessage(text);
-    const botMsg: ChatMessage = { id: genId(), role: "assistant", content: reply, timestamp: Date.now(), skill: activeSkill };
+    const botMsg: ChatMessage = { id: genId(), role: "assistant", content: reply, timestamp: Date.now(), skill: activeSkill, explain: lastExplainRef.current };
     setMessages((prev) => [...prev, botMsg]);
     setIsThinking(false);
   }, [input, isThinking, activeSkill, processMessage]);
@@ -1707,7 +1863,7 @@ export default function AssistantPage() {
           <div className="flex items-center justify-between border-b px-4 py-3" style={bd}>
             <h2 className="flex items-center gap-2 text-sm font-semibold">
               <Zap className="h-4 w-4 text-emerald-500" />
-              <span className={isDark ? "text-slate-300" : "text-slate-700"}>Skills</span>
+              <span className={isDark ? "text-slate-300" : "text-slate-700"}>Personas</span>
             </h2>
             <div className="flex items-center gap-1">
               <button onClick={() => setShowClearModal(true)} className="rounded-lg p-1.5 transition hover:bg-slate-700/50" title="Clear all data">
@@ -1720,60 +1876,80 @@ export default function AssistantPage() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-2">
-            <div className="space-y-1">
-              {skills.map((skill) => {
-                const active = activeSkill === skill.id;
+            <div className="space-y-2">
+              {personas.map((p) => {
+                const active = activePersonaId === p.persona_id;
+                const style = ICON_KEY_STYLE[p.icon_key] || ICON_KEY_STYLE.zap;
+                const statusLabel =
+                  p.status === "connected" ? "Connected" : p.status === "needs_setup" ? "Needs setup" : "Ready";
+                const statusPillClass =
+                  p.status === "connected"
+                    ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
+                    : p.status === "needs_setup"
+                    ? "bg-amber-500/15 text-amber-400 border-amber-500/30"
+                    : "bg-slate-500/15 text-slate-400 border-slate-500/30";
                 return (
-                  <div key={skill.id}>
+                  <div key={p.persona_id}>
                     <button
-                      onClick={() => setActiveSkill(skill.id)}
-                      className={`group flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition ${
+                      onClick={() => setActivePersonaId(p.persona_id)}
+                      className={`group flex w-full flex-col gap-1.5 rounded-xl border px-3 py-2.5 text-left transition ${
                         active
-                          ? isDark ? "bg-slate-700/50 border border-slate-600/50" : "bg-slate-100 border border-slate-200"
-                          : isDark ? "hover:bg-slate-700/30 border border-transparent" : "hover:bg-slate-50 border border-transparent"
+                          ? isDark ? "bg-slate-700/50 border-slate-600/50" : "bg-slate-100 border-slate-200"
+                          : isDark ? "hover:bg-slate-700/30 border-transparent" : "hover:bg-slate-50 border-transparent"
                       }`}
                     >
-                      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${skill.gradient} text-white`}>
-                        {skill.icon}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className={`text-sm font-medium ${active ? (isDark ? "text-slate-100" : "text-slate-900") : isDark ? "text-slate-300" : "text-slate-700"}`}>
-                            {skill.label}
-                          </span>
-                          {skill.connected ? <Link2 className="h-3 w-3 text-emerald-500" /> : <Link2Off className="h-3 w-3 text-slate-500" />}
+                      <div className="flex items-center gap-3">
+                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${style.gradient} text-white`}>
+                          {getPersonaIcon(p.icon_key)}
                         </div>
-                        <p className={`truncate text-[11px] ${isDark ? "text-slate-500" : "text-slate-400"}`}>{skill.description}</p>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-sm font-medium ${active ? (isDark ? "text-slate-100" : "text-slate-900") : isDark ? "text-slate-300" : "text-slate-700"}`}>
+                              {p.display_name}
+                            </span>
+                          </div>
+                          <p className={`truncate text-[11px] ${isDark ? "text-slate-500" : "text-slate-400"}`}>{p.description}</p>
+                        </div>
                       </div>
-                      {skill.id === "tasks" && pendingCount > 0 && (
-                        <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-violet-500/20 px-1.5 text-[10px] font-bold text-violet-400">{pendingCount}</span>
-                      )}
-                      {skill.id === "calendar" && todayEventCount > 0 && (
-                        <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-amber-500/20 px-1.5 text-[10px] font-bold text-amber-400">{todayEventCount}</span>
-                      )}
-                      {skill.id === "files" && scannedFiles.length > 0 && (
-                        <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-emerald-500/20 px-1.5 text-[10px] font-bold text-emerald-400">{scannedFiles.length}</span>
-                      )}
-                      {skill.id === "research" && sessions.length > 0 && (
-                        <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-cyan-500/20 px-1.5 text-[10px] font-bold text-cyan-400">{sessions.length}</span>
-                      )}
+                      <div className="flex items-center justify-between gap-2">
+                        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusPillClass}`}>
+                          {statusLabel}
+                        </span>
+                        {p.last_activity_at && (
+                          <span className={`text-[10px] ${isDark ? "text-slate-600" : "text-slate-400"}`}>
+                            {new Date(p.last_activity_at).toLocaleDateString()}
+                          </span>
+                        )}
+                        {p.persona_id === "documentation_assistant" && pendingCount > 0 && (
+                          <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-violet-500/20 px-1.5 text-[10px] font-bold text-violet-400">{pendingCount}</span>
+                        )}
+                        {p.persona_id === "time_strategist" && todayEventCount > 0 && (
+                          <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-amber-500/20 px-1.5 text-[10px] font-bold text-amber-400">{todayEventCount}</span>
+                        )}
+                        {p.persona_id === "digital_archivist" && scannedFiles.length > 0 && (
+                          <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-emerald-500/20 px-1.5 text-[10px] font-bold text-emerald-400">{scannedFiles.length}</span>
+                        )}
+                        {p.persona_id === "research_analyst" && sessions.length > 0 && (
+                          <span className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-cyan-500/20 px-1.5 text-[10px] font-bold text-cyan-400">{sessions.length}</span>
+                        )}
+                      </div>
                     </button>
 
                     {active && (
                       <div className="mt-1 ml-3 space-y-0.5 pb-2 pl-9">
-                        {skill.quickActions.map((qa, i) => (
+                        {p.example_prompts.map((prompt, i) => (
                           <button
                             key={i}
-                            onClick={() => handleQuickAction(qa.prompt, qa.action)}
+                            onClick={() => handleQuickAction(prompt, prompt.toLowerCase().startsWith("scan") ? "scan_folder" : undefined)}
                             className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[11px] transition ${
                               isDark ? "text-slate-400 hover:bg-slate-700/40 hover:text-slate-200" : "text-slate-500 hover:bg-slate-100 hover:text-slate-700"
                             }`}
                           >
-                            {qa.action === "scan_folder" ? <FolderSearch className="h-3 w-3 shrink-0 opacity-50" /> : <ChevronRight className="h-3 w-3 shrink-0 opacity-50" />}
-                            {qa.label}
+                            {prompt.toLowerCase().startsWith("scan") ? <FolderSearch className="h-3 w-3 shrink-0 opacity-50" /> : <ChevronRight className="h-3 w-3 shrink-0 opacity-50" />}
+                            {prompt}
                           </button>
                         ))}
-                        {skill.id === "email" && !isConnected("email") && (
+                        {p.requires_setup.includes("email") && !isConnected("email") && (
                           <button
                             onClick={() => setShowConnectModal("email")}
                             className={`mt-1 flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[11px] font-medium transition ${
@@ -1783,7 +1959,7 @@ export default function AssistantPage() {
                             <Plus className="h-3 w-3" /> Connect Email
                           </button>
                         )}
-                        {skill.id === "email" && isConnected("email") && (
+                        {p.requires_setup.includes("email") && isConnected("email") && (
                           <button
                             onClick={() => disconnectSkill("email")}
                             className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[10px] transition ${isDark ? "text-slate-600 hover:text-red-400" : "text-slate-400 hover:text-red-500"}`}
@@ -1791,17 +1967,17 @@ export default function AssistantPage() {
                             <Link2Off className="h-3 w-3" /> Disconnect
                           </button>
                         )}
-                        {skill.id === "calendar" && !isConnected("calendar") && (
+                        {p.requires_setup.includes("calendar") && !isConnected("calendar") && (
                           <button
                             onClick={startCalendarOAuth}
                             className={`mt-1 flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left text-[11px] font-medium transition ${
                               isDark ? "border-amber-500/30 text-amber-400 hover:bg-amber-500/10" : "border-amber-300 text-amber-600 hover:bg-amber-50"
                             }`}
                           >
-                            <Plus className="h-3 w-3" /> Connect Google Calendar
+                            <Plus className="h-3 w-3" /> Connect Calendar
                           </button>
                         )}
-                        {skill.id === "calendar" && isConnected("calendar") && (
+                        {p.requires_setup.includes("calendar") && isConnected("calendar") && (
                           <button
                             onClick={() => disconnectSkill("calendar")}
                             className={`mt-1 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[10px] transition ${isDark ? "text-slate-600 hover:text-red-400" : "text-slate-400 hover:text-red-500"}`}
@@ -1914,7 +2090,7 @@ export default function AssistantPage() {
                 {currentSkill.icon}
               </div>
               <div>
-                <h2 className="text-sm font-semibold">{currentSkill.label} Assistant</h2>
+                <h2 className="text-sm font-semibold">{currentSkill.label}</h2>
                 <p className={`text-[10px] ${isDark ? "text-slate-500" : "text-slate-400"}`}>
                   {currentSkill.connected ? (
                     <span className="flex items-center gap-1"><span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" /> Ready{currentSkill.provider ? ` — ${currentSkill.provider}` : ""}</span>
@@ -1950,7 +2126,7 @@ export default function AssistantPage() {
             ) : (
               <div className="space-y-4">
                 {messages.map((msg) => (
-                  <MessageBubble key={msg.id} msg={msg} isDark={isDark} />
+                  <MessageBubble key={msg.id} msg={msg} isDark={isDark} showExplain={assistantExplainMode} />
                 ))}
                 {isThinking && <ThinkingIndicator isDark={isDark} />}
                 <div ref={messagesEndRef} />
@@ -1983,11 +2159,23 @@ export default function AssistantPage() {
                 <Send className="h-4 w-4" />
               </button>
             </div>
-            <p className={`mt-2 text-center text-[10px] ${isDark ? "text-slate-600" : "text-slate-400"}`}>
-              <kbd className={`rounded px-1 py-0.5 ${isDark ? "bg-slate-700" : "bg-slate-200"}`}>Enter</kbd> to send
-              {" · "}
-              <kbd className={`rounded px-1 py-0.5 ${isDark ? "bg-slate-700" : "bg-slate-200"}`}>Shift+Enter</kbd> new line
-            </p>
+            <div className="mt-2 flex items-center justify-between">
+              <label className="flex cursor-pointer items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={assistantExplainMode}
+                  onChange={(e) => setAssistantExplainMode(e.target.checked)}
+                  className={`h-3.5 w-3.5 rounded ${isDark ? "border-slate-600 bg-slate-700 text-cyan-500" : "border-slate-400 text-cyan-600"}`}
+                />
+                <HelpCircle className="h-3 w-3 text-slate-500" />
+                <span className="text-[10px] text-slate-500">Explain mode</span>
+              </label>
+              <p className={`text-[10px] ${isDark ? "text-slate-600" : "text-slate-400"}`}>
+                <kbd className={`rounded px-1 py-0.5 ${isDark ? "bg-slate-700" : "bg-slate-200"}`}>Enter</kbd> to send
+                {" · "}
+                <kbd className={`rounded px-1 py-0.5 ${isDark ? "bg-slate-700" : "bg-slate-200"}`}>Shift+Enter</kbd> new line
+              </p>
+            </div>
           </div>
         </main>
       </div>
@@ -2008,26 +2196,15 @@ function EmptyState({ skill, isDark, onQuickAction, scannedCount }: { skill: Ski
     research: <Brain className="h-10 w-10 text-cyan-400" />,
     actions: <Zap className="h-10 w-10 text-amber-400" />,
   };
-  const descriptions: Record<SkillId, string> = {
-    email: "Connect your email to summarise your inbox, clean up newsletters, draft replies, and triage messages.",
-    calendar: skill.connected
-      ? "Connected to Google Calendar — add events, see your agenda, and find free time."
-      : "Connect Google Calendar to add events, see your agenda, and find free time slots.",
-    files: scannedCount > 0
-      ? `${scannedCount} files scanned. Ask me to analyse, organise, find large files, or spot duplicates.`
-      : "Scan a local folder to get file breakdowns, organisation suggestions, and find space hogs.",
-    tasks: "Add tasks, check them off, and get suggestions on what to do next. Everything is saved locally.",
-    research: "Query and synthesise findings from your past Deep Search sessions.",
-    actions: "Take real actions: list files, read/write files, create notes, search notes, copy to clipboard. Destructive actions require your approval.",
-  };
+  const description = skill.description || "Ask me anything within my capabilities.";
 
   return (
     <div className="flex h-full flex-col items-center justify-center text-center px-4">
       <div className={`mb-5 flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br ${skill.gradient} bg-opacity-20`} style={{ background: `linear-gradient(135deg, ${isDark ? "rgba(0,0,0,0.3)" : "rgba(255,255,255,0.6)"}, ${isDark ? "rgba(0,0,0,0.1)" : "rgba(255,255,255,0.3)"})` }}>
         {icons[skill.id]}
       </div>
-      <h3 className={`mb-2 text-lg font-semibold ${isDark ? "text-slate-200" : "text-slate-800"}`}>{skill.label} Assistant</h3>
-      <p className={`mb-6 max-w-md text-sm leading-relaxed ${isDark ? "text-slate-400" : "text-slate-500"}`}>{descriptions[skill.id]}</p>
+      <h3 className={`mb-2 text-lg font-semibold ${isDark ? "text-slate-200" : "text-slate-800"}`}>{skill.label}</h3>
+      <p className={`mb-6 max-w-md text-sm leading-relaxed ${isDark ? "text-slate-400" : "text-slate-500"}`}>{description}</p>
       {!skill.connected && (
         <div className={`mb-6 flex flex-col gap-2 rounded-xl border px-4 py-2.5 text-sm text-left ${isDark ? "border-amber-500/30 bg-amber-500/5 text-amber-400" : "border-amber-300 bg-amber-50 text-amber-600"}`}>
           {skill.id === "actions" ? (
@@ -2045,14 +2222,14 @@ function EmptyState({ skill, isDark, onQuickAction, scannedCount }: { skill: Ski
           ) : (
             <span className="flex items-center gap-2">
               <AlertCircle className="h-4 w-4 shrink-0" />
-              Connect your {skill.label.toLowerCase()} provider to enable this skill
+              Connect your provider to enable this persona
             </span>
           )}
         </div>
       )}
       <div className="flex flex-wrap justify-center gap-2">
         {skill.quickActions.map((qa, i) => (
-          <button key={i} onClick={() => onQuickAction(qa.prompt, qa.action)} className={`rounded-lg px-3.5 py-2 text-xs font-medium transition ${isDark ? "bg-slate-800/50 hover:bg-slate-800/80 text-slate-400" : "bg-white/70 hover:bg-white text-slate-600"}`}>
+          <button key={i} onClick={() => onQuickAction(qa.prompt, qa.prompt.toLowerCase().startsWith("scan") ? "scan_folder" : undefined)} className={`rounded-lg px-3.5 py-2 text-xs font-medium transition ${isDark ? "bg-slate-800/50 hover:bg-slate-800/80 text-slate-400" : "bg-white/70 hover:bg-white text-slate-600"}`}>
             {qa.label}
           </button>
         ))}
@@ -2061,7 +2238,8 @@ function EmptyState({ skill, isDark, onQuickAction, scannedCount }: { skill: Ski
   );
 }
 
-function MessageBubble({ msg, isDark }: { msg: ChatMessage; isDark: boolean }) {
+function MessageBubble({ msg, isDark, showExplain }: { msg: ChatMessage; isDark: boolean; showExplain?: boolean }) {
+  const [explainOpen, setExplainOpen] = useState(false);
   const renderContent = (content: string) => {
     const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
     const parts: React.ReactNode[] = [];
@@ -2110,6 +2288,69 @@ function MessageBubble({ msg, isDark }: { msg: ChatMessage; isDark: boolean }) {
         <p className={`mt-1.5 text-[10px] ${msg.role === "user" ? "text-white/50" : isDark ? "text-slate-500" : "text-slate-400"}`}>
           {new Date(msg.timestamp).toLocaleTimeString()}
         </p>
+        {showExplain && msg.role === "assistant" && msg.explain && (
+          <div className="mt-2 border-t border-slate-700/30 pt-2">
+            <button type="button" onClick={() => setExplainOpen((v) => !v)} className="flex items-center gap-1 text-[10px] text-cyan-500 hover:text-cyan-400">
+              <HelpCircle className="h-3 w-3" /> {explainOpen ? "Hide" : "Why this answer?"}
+              {explainOpen && <ChevronDown className="h-3 w-3" />}
+            </button>
+            {explainOpen && (
+              <div className="mt-2 space-y-2 text-[11px] text-slate-500">
+                {msg.explain.cache_decision && (
+                  <div>
+                    <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${msg.explain.cache_decision.hit ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400"}`}>
+                      {msg.explain.cache_decision.hit ? "Cache HIT" : "Cache MISS"}
+                    </span>
+                    {msg.explain.cache_decision.why && <span className="ml-2">{msg.explain.cache_decision.why}</span>}
+                  </div>
+                )}
+                {msg.explain.retrieval && (
+                  <div>
+                    <span className="font-medium text-slate-400">Sources: </span>
+                    {msg.explain.retrieval.sources_considered_count} considered
+                    {msg.explain.retrieval.why_these_sources && <span className="ml-1 italic">{msg.explain.retrieval.why_these_sources}</span>}
+                  </div>
+                )}
+                {msg.explain.generation && (
+                  <div>
+                    <span className="font-medium text-slate-400">Model: </span>
+                    {msg.explain.generation.model || msg.explain.generation.provider || "unknown"}
+                  </div>
+                )}
+                {msg.explain.safety && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {msg.explain.safety.risk_level && (
+                      <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                        msg.explain.safety.risk_level === "safe" ? "bg-emerald-500/20 text-emerald-400"
+                        : msg.explain.safety.risk_level === "needs_approval" ? "bg-amber-500/20 text-amber-400"
+                        : "bg-rose-500/20 text-rose-400"
+                      }`}>{msg.explain.safety.risk_level}</span>
+                    )}
+                    {msg.explain.safety.tool_calls?.map((tc, i) => (
+                      <span key={i} className="rounded bg-slate-700/30 px-1 py-0.5 text-[10px]">{tc.tool}</span>
+                    ))}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const payload = {
+                      answer_id: msg.id,
+                      cache_status: msg.explain?.cache_decision?.hit ? "hit" : "miss",
+                      retrieval_signature: `sources=${msg.explain?.retrieval?.sources_considered_count ?? 0},model=${msg.explain?.generation?.model ?? ""}`,
+                      feedback: "",
+                    };
+                    navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+                    toast.success("Issue context copied to clipboard");
+                  }}
+                  className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-cyan-400"
+                >
+                  <ExternalLink className="h-3 w-3" /> Report issue
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2193,5 +2434,13 @@ function ConnectModal({ skillId, isDark, onConnect, onClose, onGmailOAuth }: { s
         </p>
       </div>
     </div>
+  );
+}
+
+export default function AssistantPage() {
+  return (
+    <Suspense fallback={<div className="flex min-h-screen items-center justify-center text-slate-500">Loading...</div>}>
+      <AssistantPageContent />
+    </Suspense>
   );
 }

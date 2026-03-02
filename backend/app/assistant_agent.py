@@ -1,6 +1,7 @@
 """
 Assistant agent: maps user messages to executor tools and runs them.
 Uses LLM to decide which tool to call, then executes via the Rust executor.
+Persona influences system prompt and tool priority.
 """
 
 import json
@@ -10,8 +11,20 @@ from typing import Any
 
 from app.agent import _get_llm
 from app.executor_client import execute_tool, is_executor_available
+from app.personas import get_personas_config
+from app.schemas.explain import ExplainPayload, GenerationExplain, SafetyExplain, ToolCallSummary
 
 logger = logging.getLogger(__name__)
+
+
+def _get_persona_config(persona_id: str | None) -> dict | None:
+    """Return persona config dict by persona_id or None."""
+    if not persona_id:
+        return None
+    for p in get_personas_config():
+        if p.get("persona_id") == persona_id:
+            return p
+    return None
 
 TOOLS_SCHEMA = """
 Available tools (return exactly one JSON object, or {"tool": null} if no action):
@@ -108,10 +121,30 @@ def _sanitize_message(message: str) -> str:
     return cleaned[:2000]
 
 
-async def message_to_tool(message: str, model_id: str = "openai", context: dict | None = None) -> dict | None:
+def _build_persona_prompt_prefix(persona: dict | None) -> str:
+    """Build system prompt prefix from persona (display_name, description, capabilities)."""
+    if not persona:
+        return "You are an assistant that takes real actions on the user's computer."
+    name = persona.get("display_name") or "Assistant"
+    desc = persona.get("description") or ""
+    caps = persona.get("capabilities") or []
+    parts = [f"You are the **{name}**. {desc}"]
+    if caps:
+        parts.append(f"Your enabled capabilities: {', '.join(caps)}. Prefer tools that match these.")
+    return " ".join(parts)
+
+
+async def message_to_tool(
+    message: str,
+    model_id: str = "openai",
+    context: dict | None = None,
+    persona_id: str | None = None,
+    selected_context_ids: list[str] | None = None,
+) -> dict | None:
     """
     Use LLM to convert user message to a tool request.
     Returns executor-ready tool dict or None if no action.
+    Persona influences system prompt and suggestion style.
     """
     message = _sanitize_message(message)
     llm = _get_llm(model_id)
@@ -119,8 +152,13 @@ async def message_to_tool(message: str, model_id: str = "openai", context: dict 
     if context and context.get("path"):
         safe_path = str(context["path"]).replace('"', '\\"')[:500]
         path_hint = f'\n\nIMPORTANT: Use this exact path for the file: "{safe_path}"'
-    prompt = f"""You are an assistant that takes real actions on the user's computer.
-The user said: "{message}"{path_hint}
+    context_hint = ""
+    if selected_context_ids:
+        context_hint = f'\n\nUser has selected context refs: {", ".join(selected_context_ids)}. Prefer actions that use or reference these when relevant.'
+    persona = _get_persona_config(persona_id)
+    role_prefix = _build_persona_prompt_prefix(persona)
+    prompt = f"""{role_prefix}
+The user said: "{message}"{path_hint}{context_hint}
 
 {TOOLS_SCHEMA}
 
@@ -150,25 +188,49 @@ async def act(
     run_id: str,
     context: dict | None = None,
     model_id: str = "openai",
+    persona_id: str | None = None,
+    selected_context_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Interpret message, pick tool, execute via executor.
     Returns {run_id, result, tool, error?, approval_required?}.
     """
     if not is_executor_available():
+        explain = ExplainPayload(
+            cache_decision=None,
+            retrieval=None,
+            generation=GenerationExplain(model=model_id, provider=model_id),
+            safety=SafetyExplain(risk_level=None, tool_calls=[]),
+        ).model_dump()
         return {
             "run_id": run_id,
             "error": "Executor not available. Run: `cd executor-rust && cargo run` (local) or `make start` (Docker). The executor performs file, note, and clipboard actions.",
             "executor_available": False,
+            "explain": explain,
         }
 
-    tool = await message_to_tool(message, model_id, context)
+    tool = await message_to_tool(
+        message, model_id, context,
+        persona_id=persona_id,
+        selected_context_ids=selected_context_ids,
+    )
     if not tool:
+        explain = ExplainPayload(
+            cache_decision=None,
+            retrieval=None,
+            generation=GenerationExplain(model=model_id, provider=model_id),
+            safety=SafetyExplain(risk_level="safe", tool_calls=[]),
+        ).model_dump()
         return {
             "run_id": run_id,
             "result": None,
             "message": "No action to perform. Try: list my files, read a file, create a note, etc.",
+            "explain": explain,
         }
+
+    tool_name = (tool.get("tool") or "").strip()
+    risk_level = "needs_approval" if tool_name in ("fs_delete", "shell_run", "net_download") else "safe"
+    tool_summary = ToolCallSummary(tool=tool_name, summary=str(tool)[:200])
 
     try:
         result = await execute_tool(
@@ -177,14 +239,27 @@ async def act(
             dry_run=False,
             context=context,
         )
+        explain = ExplainPayload(
+            cache_decision=None,
+            retrieval=None,
+            generation=GenerationExplain(model=model_id, provider=model_id),
+            safety=SafetyExplain(risk_level=risk_level, tool_calls=[tool_summary]),
+        ).model_dump()
         return {
             "run_id": run_id,
             "result": result,
             "tool": tool,
             "executor_available": True,
+            "explain": explain,
         }
     except Exception as e:
         err = str(e)
+        explain = ExplainPayload(
+            cache_decision=None,
+            retrieval=None,
+            generation=GenerationExplain(model=model_id, provider=model_id),
+            safety=SafetyExplain(risk_level=risk_level, tool_calls=[tool_summary]),
+        ).model_dump()
         # Check if it's an approval timeout (user didn't approve in time)
         if "timed out" in err.lower() or "approval" in err.lower():
             return {
@@ -192,12 +267,14 @@ async def act(
                 "error": "Action requires your approval. Please click Approve in the notification.",
                 "approval_required": True,
                 "tool": tool,
+                "explain": explain,
             }
         return {
             "run_id": run_id,
             "error": err,
             "tool": tool,
             "executor_available": True,
+            "explain": explain,
         }
 
 
@@ -213,11 +290,18 @@ async def run_heartbeat(
     """
     Run an autonomous heartbeat check. Uses LLM to decide if the user needs an alert.
     Returns { status: "ok" | "alert", message?: str }.
+    Does not alert solely for "executor not connected" (common when not using Docker).
     """
     ctx = context or {}
-    pending_tasks = ctx.get("pending_tasks", 0)
-    events_today = ctx.get("events_today", 0)
+    pending_tasks = int(ctx.get("pending_tasks") or 0)
+    events_today = int(ctx.get("events_today") or 0)
     executor_available = ctx.get("executor_available")
+
+    # Do not alert when the only notable condition is executor not connected
+    # (e.g. 1 pending task + executor down is noisy; executor is optional for many users)
+    if executor_available is False and pending_tasks <= 10 and events_today <= 20:
+        return {"status": "ok"}
+
     summary_parts = [
         f"Pending tasks: {pending_tasks}",
         f"Events today: {events_today}",
@@ -225,7 +309,12 @@ async def run_heartbeat(
     ]
     if ctx.get("last_alert"):
         summary_parts.append(f"Last user-dismissed alert was: {ctx['last_alert'][:80]}...")
-    prompt = "Current context:\n" + "\n".join(summary_parts) + "\n\nShould the user be alerted? Reply HEARTBEAT_OK or one short alert sentence."
+    prompt = (
+        "Current context:\n"
+        + "\n".join(summary_parts)
+        + "\n\nShould the user be alerted? Reply HEARTBEAT_OK or one short alert sentence. "
+        "Do NOT suggest an alert only because the executor is not connected."
+    )
 
     try:
         from langchain_core.messages import HumanMessage

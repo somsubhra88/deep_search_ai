@@ -118,6 +118,7 @@ class RAGResponse(BaseModel):
     scope_used: str = "HYBRID"
     kb_chunks_used: int = 0
     web_cards_used: int = 0
+    explain: Optional[dict] = Field(default=None, description="Structured explainability payload")
 
 
 # ---------------------------------------------------------------------------

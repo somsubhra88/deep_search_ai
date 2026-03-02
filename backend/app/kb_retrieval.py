@@ -24,6 +24,13 @@ from app.kb_schemas import (
     RAGResponse,
     WebCitation,
 )
+from app.schemas.explain import (
+    CacheDecision,
+    ExplainPayload,
+    GenerationExplain,
+    RetrievalExplain,
+    TopSource,
+)
 from app.rag.embeddings import Embedder, get_embedder
 
 logger = logging.getLogger(__name__)
@@ -440,6 +447,37 @@ async def query_rag(
         await progress_callback("rag.verifying", {})
 
     response = _verify_citations(response, kb_chunks, web_cards)
+
+    # Attach structured explain (no prompts or secrets)
+    top_sources: list[dict] = []
+    for c in kb_chunks[:10]:
+        top_sources.append({
+            "title": (c.filename or c.doc_id or "")[:200],
+            "url": "",
+            "doc_id": c.doc_id,
+            "score": c.score,
+        })
+    for i, c in enumerate(web_cards[:6]):
+        top_sources.append({
+            "title": (c.get("title") or c.get("url", ""))[:200],
+            "url": c.get("url", ""),
+            "doc_id": "",
+            "score": None,
+        })
+    retrieval = RetrievalExplain(
+        sources_considered_count=len(kb_chunks) + len(web_cards),
+        top_sources=[TopSource(**s) for s in top_sources],
+        retrieval_params={"top_k_kb": top_k_kb, "top_k_web": top_k_web, "scope": scope},
+        why_these_sources=f"Retrieved {len(kb_chunks)} KB chunks and {len(web_cards)} web cards by semantic similarity (scope: {scope}).",
+    )
+    generation = GenerationExplain(model=model_name or model_id, provider=model_id, prompt_version="1")
+    explain = ExplainPayload(
+        cache_decision=None,
+        retrieval=retrieval,
+        generation=generation,
+        safety=None,
+    )
+    response.explain = explain.model_dump()
 
     if progress_callback:
         await progress_callback("rag.final", response.model_dump())

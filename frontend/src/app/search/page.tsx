@@ -4,15 +4,12 @@ import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import {
   Search,
   Loader2,
-  Copy,
-  Check,
   FileText,
   Shield,
   Zap,
   ChevronDown,
   ChevronUp,
   History,
-  Download,
   AlertCircle,
   Scale,
   Eye,
@@ -32,8 +29,13 @@ import {
   Settings2,
   Database,
   Trash2,
+  Pin,
+  MoreHorizontal,
+  ArrowRightCircle,
+  HelpCircle,
+  ChevronRight,
+  ExternalLink,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
 import { toast } from "sonner";
 import MemoryGraphWidget from "@/components/memory/MemoryGraphWidget";
 import DebateMode from "@/components/debate/DebateMode";
@@ -50,8 +52,16 @@ import {
   SESSIONS_KEY,
   MAX_SESSIONS,
   SETUP_KEY,
+  BRIDGE_PINNED_KEY,
+  EXPLAIN_MODE_KEY,
+  saveActiveReport,
+  loadActiveReport,
+  clearActiveReport,
 } from "@/lib/storage";
+import type { ActiveReport } from "@/lib/storage";
+import { useRouter } from "next/navigation";
 import ClearHistoryModal from "@/components/ClearHistoryModal";
+import ReportViewer from "@/components/ReportViewer";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -141,6 +151,30 @@ type RecalledMemory = {
   essence: string;
   timestamp: string;
   similarity: number;
+};
+
+/** Action suggestion from POST /api/search/{id}/action_suggestions (backend-generated, no hardcoding). */
+type BridgeSuggestion = {
+  action_id: string;
+  label: string;
+  icon_key: string;
+  short_description: string;
+  risk_hint: string;
+  suggested_persona_id: string;
+  prefill_prompt: string;
+};
+
+/** Structured explain payload (Search/Assistant). Safe: no prompts or secrets. */
+type ExplainPayload = {
+  cache_decision?: { hit: boolean; kind: string; hits?: number; misses?: number; hit_rate?: string; why?: string } | null;
+  retrieval?: {
+    sources_considered_count: number;
+    top_sources: Array<{ title: string; url?: string; doc_id?: string; score?: number | null }>;
+    retrieval_params: Record<string, unknown>;
+    why_these_sources?: string;
+  } | null;
+  generation?: { model?: string; provider?: string; prompt_version?: string; temperature?: number; max_tokens?: number } | null;
+  safety?: { risk_level?: string | null; approvals?: unknown[]; tool_calls?: Array<{ tool: string; summary?: string }> } | null;
 };
 
 type SearchMode =
@@ -737,8 +771,23 @@ const SwarmVisualizer = ({ isDark }: { isDark: boolean }) => {
 // Main Component
 // ---------------------------------------------------------------------------
 
+const BRIDGE_VISIBLE_PILLS = 5;
+
+function getBridgeIcon(iconKey: string) {
+  switch (iconKey) {
+    case "search": return <Search className="h-3.5 w-3.5 shrink-0" />;
+    case "folder": return <FileText className="h-3.5 w-3.5 shrink-0" />;
+    case "mail": return <MessageSquarePlus className="h-3.5 w-3.5 shrink-0" />;
+    case "calendar": return <Clock className="h-3.5 w-3.5 shrink-0" />;
+    case "list": return <History className="h-3.5 w-3.5 shrink-0" />;
+    case "zap": return <Zap className="h-3.5 w-3.5 shrink-0" />;
+    default: return <ArrowRightCircle className="h-3.5 w-3.5 shrink-0" />;
+  }
+}
+
 export default function SearchPage() {
   const { isDark } = useTheme();
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [isResearching, setIsResearching] = useState(false);
   const [progressLog, setProgressLog] = useState<ProgressStep[]>([]);
@@ -776,6 +825,23 @@ export default function SearchPage() {
     search_provider: "serpapi",
     search_api_key: "",
   });
+  const [currentSearchId, setCurrentSearchId] = useState<string | null>(null);
+  const [bridgeSuggestions, setBridgeSuggestions] = useState<BridgeSuggestion[]>([]);
+  const [bridgeLoading, setBridgeLoading] = useState(false);
+  const [bridgeMoreOpen, setBridgeMoreOpen] = useState(false);
+  const [explainMode, setExplainMode] = useState(() => loadFromStorage(EXPLAIN_MODE_KEY, false));
+  const [currentExplain, setCurrentExplain] = useState<ExplainPayload | null>(null);
+  const [explainPanelOpen, setExplainPanelOpen] = useState(false);
+  const [pinnedActionIds, setPinnedActionIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(BRIDGE_PINNED_KEY);
+      if (!raw) return new Set<string>();
+      const arr = JSON.parse(raw) as string[];
+      return new Set(Array.isArray(arr) ? arr : []);
+    } catch {
+      return new Set<string>();
+    }
+  });
 
   const searchRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -810,6 +876,18 @@ export default function SearchPage() {
     } else {
       setShowSetupModal(true);
     }
+    // Restore active report if navigating back (e.g. from Assistant)
+    const saved = loadActiveReport();
+    if (saved?.report) {
+      setQuery(saved.query || "");
+      setReport(saved.report);
+      setMetadata(saved.metadata as ReportMetadata | null);
+      setCurrentSearchId(saved.searchId);
+      setEssenceText(saved.essenceText);
+      setRecalledMemories((saved.recalledMemories || []) as RecalledMemory[]);
+      setCurrentExplain(saved.explain as ExplainPayload | null);
+      setBridgeSuggestions((saved.bridgeSuggestions || []) as BridgeSuggestion[]);
+    }
   }, []);
 
   useEffect(() => {
@@ -843,28 +921,68 @@ export default function SearchPage() {
     });
   }, [selectedModes, searchProvider, modelName]);
 
-  const saveSession = useCallback((q: string, r: string, m: ReportMetadata | null) => {
-    setSessions((prev) => {
-      const session: Session = {
-        id: Date.now().toString(36),
-        query: q,
-        timestamp: Date.now(),
-        report: r.slice(0, 50000),
-        metadata: m,
-      };
-      const next = [session, ...prev].slice(0, MAX_SESSIONS);
-      compressAndStore(SESSIONS_KEY, next);
+  const handleClearHistory = useCallback(() => {
+    clearAllSearchHistory();
+    clearActiveReport();
+    setHistory([]);
+    setSessions([]);
+    setReport(null);
+    setMetadata(null);
+    setCurrentSearchId(null);
+    setCurrentExplain(null);
+    setEssenceText(null);
+    setRecalledMemories([]);
+    setBridgeSuggestions([]);
+    setShowClearModal(false);
+    toast.success("History cleared");
+  }, []);
+
+  useEffect(() => {
+    if (!currentSearchId || !report) return;
+    setBridgeLoading(true);
+    fetch(`/api/search/${encodeURIComponent(currentSearchId)}/action_suggestions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        perspective_dial: perspectiveBias,
+        modes: Array.from(selectedModes),
+      }),
+    })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: BridgeSuggestion[]) => {
+        setBridgeSuggestions(Array.isArray(data) ? data : []);
+      })
+      .catch(() => setBridgeSuggestions([]))
+      .finally(() => setBridgeLoading(false));
+  }, [currentSearchId, report, perspectiveBias, selectedModes]);
+
+  const togglePin = useCallback((actionId: string) => {
+    setPinnedActionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(actionId)) next.delete(actionId);
+      else next.add(actionId);
+      try {
+        localStorage.setItem(BRIDGE_PINNED_KEY, JSON.stringify(Array.from(next)));
+      } catch {
+        /* quota */
+      }
       return next;
     });
   }, []);
 
-  const handleClearHistory = useCallback(() => {
-    clearAllSearchHistory();
-    setHistory([]);
-    setSessions([]);
-    setShowClearModal(false);
-    toast.success("History cleared");
-  }, []);
+  const openAssistantWithAction = useCallback(
+    (s: BridgeSuggestion) => {
+      const params = new URLSearchParams({
+        from: "search",
+        search_id: currentSearchId!,
+        action_id: s.action_id,
+        persona_id: s.suggested_persona_id,
+      });
+      if (s.prefill_prompt) params.set("prefill", s.prefill_prompt);
+      router.push(`/assistant?${params.toString()}`);
+    },
+    [currentSearchId, router]
+  );
 
   const updateSetupProvider = useCallback((provider: ModelId) => {
     const defaultModel = MODEL_CATALOG[provider][0] || "";
@@ -967,6 +1085,10 @@ export default function SearchPage() {
     setProgressLog([]);
     setReport(null);
     setMetadata(null);
+    setCurrentSearchId(null);
+    setCurrentExplain(null);
+    setBridgeSuggestions([]);
+    clearActiveReport();
     setError(null);
     setShowFullError(false);
     setEssenceText(null);
@@ -1049,7 +1171,36 @@ export default function SearchPage() {
                       meta.recalled_memories as RecalledMemory[]
                     );
                   }
-                  saveSession(q, data.data.report, meta);
+                  const reportText = data.data.report as string;
+                  const session: Session = {
+                    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+                    query: q,
+                    timestamp: Date.now(),
+                    report: reportText.slice(0, 50000),
+                    metadata: meta,
+                  };
+                  setSessions((prev) => {
+                    const next = [session, ...prev].slice(0, MAX_SESSIONS);
+                    compressAndStore(SESSIONS_KEY, next);
+                    return next;
+                  });
+                  setCurrentSearchId(session.id);
+                  setCurrentExplain((data.data as { explain?: ExplainPayload }).explain ?? null);
+                  fetch("/api/search/record", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      id: session.id,
+                      query: session.query,
+                      created_at: session.timestamp,
+                      mode: Array.from(selectedModes),
+                      provider: searchProvider,
+                      model: modelName,
+                      perspective: perspectiveBias,
+                      citations: meta?.sources ?? [],
+                      summary_snippet: (meta?.essence_text || reportText.slice(0, 500)) ?? "",
+                    }),
+                  }).catch(() => {});
                   toast.success("Report ready!");
                 }
               } catch {
@@ -1068,7 +1219,7 @@ export default function SearchPage() {
       setIsResearching(false);
       abortRef.current = null;
     }
-  }, [query, useSnippetsOnly, safeSearch, selectedModes, modelId, modelName, modeSettings, addToHistory, saveSession, setup, configuredProviders]);
+  }, [query, useSnippetsOnly, safeSearch, selectedModes, modelId, modelName, modeSettings, addToHistory, setup, configuredProviders, searchProvider, perspectiveBias]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1104,6 +1255,36 @@ export default function SearchPage() {
     URL.revokeObjectURL(url);
     toast.success("Report downloaded");
   }, [report, query]);
+
+  // Persist active report to sessionStorage so it survives navigation (e.g. Search → Assistant → back)
+  useEffect(() => {
+    if (report) {
+      saveActiveReport({
+        query,
+        report,
+        metadata: metadata as Record<string, unknown> | null,
+        searchId: currentSearchId,
+        essenceText,
+        recalledMemories: recalledMemories as ActiveReport["recalledMemories"],
+        explain: currentExplain as Record<string, unknown> | null,
+        bridgeSuggestions: bridgeSuggestions as unknown[],
+      });
+    }
+  }, [report, query, metadata, currentSearchId, essenceText, recalledMemories, currentExplain, bridgeSuggestions]);
+
+  const clearReport = useCallback(() => {
+    setReport(null);
+    setMetadata(null);
+    setCurrentSearchId(null);
+    setCurrentExplain(null);
+    setEssenceText(null);
+    setRecalledMemories([]);
+    setBridgeSuggestions([]);
+    setError(null);
+    setProgressLog([]);
+    clearActiveReport();
+    toast.success("Report cleared");
+  }, []);
 
   const loadSession = useCallback((session: Session) => {
     setQuery(session.query);
@@ -1714,9 +1895,128 @@ export default function SearchPage() {
           />
         )}
 
+        {/* Search → Assistant Bridge: context-aware actions (backend-generated) */}
+        {report && currentSearchId && (
+          <div className={`rounded-xl border px-4 py-3 ${isDark ? "border-slate-700/40 bg-slate-800/20" : "border-slate-200 bg-white/60"}`}>
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Turn this research into action
+              </span>
+              {bridgeLoading && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" />
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {bridgeSuggestions.slice(0, BRIDGE_VISIBLE_PILLS).map((s) => (
+                <div key={s.action_id} className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => openAssistantWithAction(s)}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition-colors ${
+                      isDark
+                        ? "border-slate-600 bg-slate-700/50 text-slate-200 hover:bg-slate-600/50"
+                        : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                    }`}
+                    title={s.short_description || undefined}
+                  >
+                    {getBridgeIcon(s.icon_key)}
+                    <span>{s.label}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      togglePin(s.action_id);
+                    }}
+                    className={`rounded-full p-1 transition-colors ${
+                      pinnedActionIds.has(s.action_id)
+                        ? "text-amber-500"
+                        : isDark
+                          ? "text-slate-500 hover:text-slate-300"
+                          : "text-slate-400 hover:text-slate-600"
+                    }`}
+                    title={pinnedActionIds.has(s.action_id) ? "Unpin" : "Pin"}
+                    aria-label={pinnedActionIds.has(s.action_id) ? "Unpin" : "Pin"}
+                  >
+                    <Pin className={`h-3.5 w-3.5 ${pinnedActionIds.has(s.action_id) ? "fill-current" : ""}`} />
+                  </button>
+                </div>
+              ))}
+              {bridgeSuggestions.length > BRIDGE_VISIBLE_PILLS && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setBridgeMoreOpen((o) => !o)}
+                    className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-sm ${
+                      isDark ? "border-slate-600 bg-slate-700/50 text-slate-300" : "border-slate-300 bg-white text-slate-600"
+                    }`}
+                  >
+                    <MoreHorizontal className="h-3.5 w-3.5" />
+                    More
+                  </button>
+                  {bridgeMoreOpen && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-10"
+                        aria-hidden
+                        onClick={() => setBridgeMoreOpen(false)}
+                      />
+                      <div
+                        className={`absolute left-0 top-full z-20 mt-1 flex max-h-48 flex-col gap-1 overflow-y-auto rounded-lg border py-1 ${
+                          isDark ? "border-slate-600 bg-slate-800" : "border-slate-200 bg-white"
+                        }`}
+                      >
+                        {bridgeSuggestions.slice(BRIDGE_VISIBLE_PILLS).map((s) => (
+                          <button
+                            key={s.action_id}
+                            type="button"
+                            onClick={() => {
+                              openAssistantWithAction(s);
+                              setBridgeMoreOpen(false);
+                            }}
+                            className={`flex items-center gap-2 px-3 py-2 text-left text-sm ${
+                              isDark ? "hover:bg-slate-700" : "hover:bg-slate-100"
+                            }`}
+                            title={s.short_description || undefined}
+                          >
+                            {getBridgeIcon(s.icon_key)}
+                            <span>{s.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Report + All Metadata */}
         {report && (
           <div className="space-y-8">
+
+            {/* Explain mode toggle (per-session, client-side) */}
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={explainMode}
+                  onChange={(e) => {
+                    const v = e.target.checked;
+                    setExplainMode(v);
+                    try {
+                      localStorage.setItem(EXPLAIN_MODE_KEY, JSON.stringify(v));
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  className={`h-4 w-4 rounded ${isDark ? "border-slate-600 bg-slate-700 text-cyan-500" : "border-slate-400 text-cyan-600"}`}
+                />
+                <HelpCircle className={`h-4 w-4 ${isDark ? "text-slate-400" : "text-slate-500"}`} />
+                <span className="text-sm text-slate-600 dark:text-slate-300">Explain mode</span>
+              </label>
+            </div>
 
             {/* Token Usage Bar */}
             {tokenUsage && (
@@ -1872,8 +2172,25 @@ export default function SearchPage() {
             )}
 
             {/* Report */}
-            <div className={`rounded-2xl border shadow-xl ${isDark ? "border-slate-700/60 bg-slate-800/30 shadow-slate-900/50" : "border-slate-200 bg-white/90 shadow-slate-200/50"}`}>
-              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-700/60 px-6 py-4 dark:border-slate-700/60">
+            {metadata?.sections && metadata.sections.length > 0 && (
+              <div className={`rounded-2xl border px-6 py-4 ${isDark ? "border-slate-700/60 bg-slate-800/30" : "border-slate-200 bg-white/90"}`}>
+                <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-400">Report Quality</h3>
+                <div className="flex flex-wrap gap-2">
+                  {metadata.sections.map((sec, i) => (
+                    <ConfidenceBadge key={i} heading={sec.heading} confidence={sec.confidence ?? sec.sources?.length ?? 1} consensus={sec.consensus ?? "single_source"} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <ReportViewer
+              markdown={report}
+              isDark={isDark}
+              onCopy={copyToClipboard}
+              onDownload={downloadReport}
+              onClear={clearReport}
+              copied={copied}
+              headerSlot={
                 <h2 className="flex items-center gap-2 font-semibold">
                   <FileText className="h-5 w-5 text-emerald-500" /> Research Report
                   {metadata?.model_used && (
@@ -1887,47 +2204,136 @@ export default function SearchPage() {
                     </span>
                   ))}
                 </h2>
-                <div className="flex gap-2">
-                  <button onClick={copyToClipboard} className="flex items-center gap-2 rounded-lg bg-slate-700/60 px-4 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-600/60 dark:bg-slate-700/60">
-                    {copied ? <><Check className="h-4 w-4 text-emerald-500" /> Copied!</> : <><Copy className="h-4 w-4" /> Copy</>}
-                  </button>
-                  <button onClick={downloadReport} className="flex items-center gap-2 rounded-lg bg-slate-700/60 px-4 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-600/60 dark:bg-slate-700/60">
-                    <Download className="h-4 w-4" /> Download .md
-                  </button>
-                </div>
-              </div>
+              }
+            />
 
-              {metadata?.sections && metadata.sections.length > 0 && (
-                <div className="border-b border-slate-700/60 px-6 py-4 dark:border-slate-700/60">
-                  <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-400">Report Quality</h3>
-                  <div className="flex flex-wrap gap-2">
-                    {metadata.sections.map((sec, i) => (
-                      <ConfidenceBadge key={i} heading={sec.heading} confidence={sec.confidence ?? sec.sources?.length ?? 1} consensus={sec.consensus ?? "single_source"} />
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <article className={`prose max-w-none px-6 py-8 ${isDark ? "prose-invert prose-slate" : "prose-slate"}`}>
-                <ReactMarkdown
-                  components={{
-                    a: ({ href, children }) => {
-                      const safeHref = href && (href.startsWith("http://") || href.startsWith("https://")) ? href : "#";
-                      return <a href={safeHref} target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:text-emerald-300 underline">{children}</a>;
-                    },
-                    h2: ({ children }) => <h2 className="mt-8 mb-4 text-xl font-bold">{children}</h2>,
-                    h3: ({ children }) => <h3 className="mt-6 mb-3 text-lg font-semibold text-slate-700 dark:text-slate-200">{children}</h3>,
-                    p: ({ children }) => <p className="mb-4 leading-relaxed text-slate-300 dark:text-slate-300">{children}</p>,
-                    ul: ({ children }) => <ul className="mb-4 list-disc space-y-1 pl-6 text-slate-300 dark:text-slate-300">{children}</ul>,
-                    ol: ({ children }) => <ol className="mb-4 list-decimal space-y-1 pl-6 text-slate-300 dark:text-slate-300">{children}</ol>,
-                    code: ({ children }) => <code className="rounded bg-slate-700/60 px-1.5 py-0.5 font-mono text-sm dark:bg-slate-700/60">{children}</code>,
-                    blockquote: ({ children }) => <blockquote className="border-l-4 border-emerald-500/50 pl-4 italic text-slate-400 dark:text-slate-400">{children}</blockquote>,
-                  }}
+            {/* Explain panel (structured transparency, no prompts/secrets) */}
+            {explainMode && currentExplain && (
+              <div className={`rounded-2xl border p-5 ${isDark ? "border-cyan-500/30 bg-cyan-500/5" : "border-cyan-300 bg-cyan-50/50"}`}>
+                <button
+                  type="button"
+                  onClick={() => setExplainPanelOpen((v) => !v)}
+                  className="flex w-full items-center justify-between text-left"
                 >
-                  {report}
-                </ReactMarkdown>
-              </article>
-            </div>
+                  <h3 className="flex items-center gap-2 text-sm font-semibold text-cyan-600 dark:text-cyan-400">
+                    <HelpCircle className="h-4 w-4" /> Why this answer?
+                  </h3>
+                  {explainPanelOpen
+                    ? <ChevronDown className="h-4 w-4 text-cyan-500" />
+                    : <ChevronRight className="h-4 w-4 text-cyan-500" />}
+                </button>
+                {explainPanelOpen && (
+                  <div className="mt-4 space-y-5 text-sm">
+                    {/* Cache Decision */}
+                    {currentExplain.cache_decision && (
+                      <div>
+                        <h4 className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Cache Decision</h4>
+                        <div className="flex flex-wrap gap-3 text-slate-600 dark:text-slate-300">
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${currentExplain.cache_decision.hit ? "bg-emerald-500/20 text-emerald-400" : "bg-amber-500/20 text-amber-400"}`}>
+                            {currentExplain.cache_decision.hit ? "Cache HIT" : "Cache MISS"}
+                          </span>
+                          {currentExplain.cache_decision.hit_rate && (
+                            <span className="text-xs text-slate-500">Hit rate: {currentExplain.cache_decision.hit_rate}</span>
+                          )}
+                          {currentExplain.cache_decision.why && (
+                            <span className="text-xs text-slate-500">{currentExplain.cache_decision.why}</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Retrieval: Sources Used */}
+                    {currentExplain.retrieval && (
+                      <div>
+                        <h4 className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">
+                          Sources ({currentExplain.retrieval.sources_considered_count} considered)
+                        </h4>
+                        {currentExplain.retrieval.why_these_sources && (
+                          <p className="mb-2 text-xs italic text-slate-500">{currentExplain.retrieval.why_these_sources}</p>
+                        )}
+                        <ul className="space-y-1">
+                          {currentExplain.retrieval.top_sources.slice(0, 10).map((s, i) => (
+                            <li key={i} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                              <span className="shrink-0 text-slate-500">[{i + 1}]</span>
+                              {s.url ? (
+                                <a href={s.url} target="_blank" rel="noopener noreferrer" className="truncate text-cyan-500 hover:underline">
+                                  {s.title || s.url}
+                                </a>
+                              ) : (
+                                <span className="truncate">{s.title || s.doc_id || "Unknown"}</span>
+                              )}
+                              {s.score != null && (
+                                <span className="shrink-0 rounded bg-slate-700/40 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-400">{s.score.toFixed(3)}</span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                        {Object.keys(currentExplain.retrieval.retrieval_params).length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">
+                            {Object.entries(currentExplain.retrieval.retrieval_params).map(([k, v]) => (
+                              <span key={k} className="rounded bg-slate-700/30 px-1.5 py-0.5">{k}: {String(v)}</span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Generation */}
+                    {currentExplain.generation && (
+                      <div>
+                        <h4 className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Generation</h4>
+                        <div className="flex flex-wrap gap-3 text-xs text-slate-600 dark:text-slate-300">
+                          {currentExplain.generation.model && <span>Model: <strong>{currentExplain.generation.model}</strong></span>}
+                          {currentExplain.generation.provider && <span>Provider: {currentExplain.generation.provider}</span>}
+                          {currentExplain.generation.prompt_version && <span>Prompt v{currentExplain.generation.prompt_version}</span>}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Safety / Actions */}
+                    {currentExplain.safety && (
+                      <div>
+                        <h4 className="mb-1 text-xs font-semibold uppercase tracking-wider text-slate-500">Safety</h4>
+                        <div className="flex flex-wrap gap-3 text-xs text-slate-600 dark:text-slate-300">
+                          {currentExplain.safety.risk_level && (
+                            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                              currentExplain.safety.risk_level === "safe" ? "bg-emerald-500/20 text-emerald-400"
+                              : currentExplain.safety.risk_level === "needs_approval" ? "bg-amber-500/20 text-amber-400"
+                              : "bg-rose-500/20 text-rose-400"
+                            }`}>
+                              {currentExplain.safety.risk_level}
+                            </span>
+                          )}
+                          {currentExplain.safety.tool_calls?.map((tc, i) => (
+                            <span key={i} className="rounded bg-slate-700/30 px-1.5 py-0.5">{tc.tool}{tc.summary ? `: ${tc.summary.slice(0, 60)}` : ""}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Report Issue */}
+                    <div className="border-t border-slate-700/30 pt-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const payload = {
+                            answer_id: currentSearchId,
+                            cache_status: currentExplain.cache_decision?.hit ? "hit" : "miss",
+                            retrieval_signature: `sources=${currentExplain.retrieval?.sources_considered_count ?? 0},model=${currentExplain.generation?.model ?? ""}`,
+                            feedback: "",
+                          };
+                          navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+                          toast.success("Issue context copied to clipboard");
+                        }}
+                        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-cyan-400 transition-colors"
+                      >
+                        <ExternalLink className="h-3 w-3" /> Report issue (copies context)
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Data Void & Research Gaps */}
             {(metadata?.data_void || (metadata?.research_gaps && metadata.research_gaps.length > 0)) && (
