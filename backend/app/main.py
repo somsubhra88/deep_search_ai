@@ -41,7 +41,7 @@ def _resolve_env_path() -> pathlib.Path:
 _ENV_PATH = _resolve_env_path()
 load_dotenv(dotenv_path=_ENV_PATH)
 
-from app.agent import run_research_agent, clear_llm_cache, _get_llm, MODEL_REGISTRY
+from app.agent import run_research_agent, clear_llm_cache, clear_search_cache, _get_llm, MODEL_REGISTRY
 from app.memory_graph import recall_past_context
 from app.db import init_db, new_session_id, create_session, get_session, update_session_status
 from app.debate_engine import DebateOrchestrator
@@ -361,6 +361,105 @@ def _upsert_env_values(env_path: pathlib.Path, updates: dict[str, str]) -> None:
 @app.get("/health")
 async def health():
     return {"status": "ok", "version": "0.2.0"}
+
+
+# ---------------------------------------------------------------------------
+# Command palette (GET /api/commands, POST /api/cache/clear)
+# ---------------------------------------------------------------------------
+
+class CommandActionRoute(BaseModel):
+    type: Literal["route"] = "route"
+    path: str
+
+
+class CommandActionToggle(BaseModel):
+    type: Literal["toggle"] = "toggle"
+    key: str
+
+
+class CommandActionSearchFocus(BaseModel):
+    type: Literal["search_focus"] = "search_focus"
+
+
+class CommandActionAssistantNewChat(BaseModel):
+    type: Literal["assistant_new_chat"] = "assistant_new_chat"
+
+
+class CommandActionClearHistory(BaseModel):
+    type: Literal["clear_history"] = "clear_history"
+
+
+class CommandActionOpenPersona(BaseModel):
+    type: Literal["open_persona"] = "open_persona"
+    persona_id: str
+
+
+class CommandActionClearCache(BaseModel):
+    type: Literal["clear_cache"] = "clear_cache"
+
+
+CommandAction = (
+    CommandActionRoute
+    | CommandActionToggle
+    | CommandActionSearchFocus
+    | CommandActionAssistantNewChat
+    | CommandActionClearHistory
+    | CommandActionOpenPersona
+    | CommandActionClearCache
+)
+
+
+class CommandItem(BaseModel):
+    id: str
+    title: str
+    subtitle: Optional[str] = None
+    icon_key: Optional[str] = None
+    group: str
+    shortcut: Optional[str] = None
+    action: dict  # One of the CommandAction variants as dict for JSON
+
+
+def _build_commands_list() -> list[dict]:
+    """Build schema-driven command list for the palette. Add new commands here or from config."""
+    personas = get_personas_config()
+    persona_commands = [
+        {
+            "id": f"persona_{p['persona_id']}",
+            "title": p["display_name"],
+            "subtitle": p.get("description", ""),
+            "icon_key": p.get("icon_key", "zap"),
+            "group": "Personas",
+            "shortcut": None,
+            "action": {"type": "open_persona", "persona_id": p["persona_id"]},
+        }
+        for p in personas
+    ]
+    # Shortcuts use ⌘ on Mac; frontend shows Ctrl+ on Windows/Linux
+    return [
+        {"id": "nav_search", "title": "Go to Search", "subtitle": "Open search page", "icon_key": "search", "group": "Navigation", "shortcut": "⌘1", "action": {"type": "route", "path": "/search"}},
+        {"id": "nav_assistant", "title": "Go to Assistant", "subtitle": "Open assistant chat", "icon_key": "messageCircle", "group": "Navigation", "shortcut": "⌘2", "action": {"type": "route", "path": "/assistant"}},
+        {"id": "toggle_explain", "title": "Toggle Explain mode", "subtitle": "Show/hide explain panel", "icon_key": "helpCircle", "group": "Toggles", "shortcut": "⌘E", "action": {"type": "toggle", "key": "explain_mode"}},
+        {"id": "toggle_snippets", "title": "Toggle Snippets only", "subtitle": "Use snippets only for search", "icon_key": "fileText", "group": "Toggles", "shortcut": None, "action": {"type": "toggle", "key": "snippets_only"}},
+        {"id": "toggle_safe_search", "title": "Toggle Safe search", "subtitle": "Filter safe search", "icon_key": "shield", "group": "Toggles", "shortcut": None, "action": {"type": "toggle", "key": "safe_search"}},
+        {"id": "action_search_focus", "title": "New Search", "subtitle": "Focus search input", "icon_key": "search", "group": "Actions", "shortcut": "⌘L", "action": {"type": "search_focus"}},
+        {"id": "action_new_chat", "title": "New Assistant Chat", "subtitle": "Start a new chat", "icon_key": "plus", "group": "Actions", "shortcut": "⌘N", "action": {"type": "assistant_new_chat"}},
+        {"id": "action_clear_history", "title": "Clear history", "subtitle": "Clear search and assistant history (local)", "icon_key": "trash2", "group": "Actions", "shortcut": None, "action": {"type": "clear_history"}},
+        {"id": "cache_clear", "title": "Clear cache", "subtitle": "Clear backend search and LLM caches", "icon_key": "trash2", "group": "Cache", "shortcut": None, "action": {"type": "clear_cache"}},
+    ] + persona_commands
+
+
+@app.get("/api/commands")
+async def get_commands():
+    """Return command palette entries. Schema-driven; add new commands in _build_commands_list or via config."""
+    return _build_commands_list()
+
+
+@app.post("/api/cache/clear")
+async def clear_cache():
+    """Clear in-memory LLM and search caches. Safe to call; no user data cleared."""
+    clear_llm_cache()
+    clear_search_cache()
+    return {"status": "ok", "message": "Cache cleared"}
 
 
 @app.get("/api/providers")

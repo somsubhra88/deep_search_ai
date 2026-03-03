@@ -42,6 +42,7 @@ import DebateMode from "@/components/debate/DebateMode";
 import RAGMode from "@/components/RAGMode";
 import ModeCustomization, { DEFAULT_MODE_SETTINGS, type ModeSettings } from "@/components/ModeCustomization";
 import { useTheme } from "@/context/ThemeContext";
+import { useCommandPalette } from "@/context/CommandPaletteContext";
 import {
   compressAndStore,
   loadFromStorage,
@@ -864,6 +865,8 @@ export default function SearchPage() {
     });
   }, []);
 
+  const { registerHandlers } = useCommandPalette();
+
   useEffect(() => {
     setHistory(loadFromStorage(HISTORY_KEY, []));
     setSessions(loadFromStorage(SESSIONS_KEY, []));
@@ -889,6 +892,38 @@ export default function SearchPage() {
       setBridgeSuggestions((saved.bridgeSuggestions || []) as BridgeSuggestion[]);
     }
   }, []);
+
+  useEffect(() => {
+    const unregister = registerHandlers({
+      toggle: (key) => {
+        if (key === "explain_mode") {
+          setExplainMode((prev) => {
+            const next = !prev;
+            try {
+              localStorage.setItem(EXPLAIN_MODE_KEY, JSON.stringify(next));
+            } catch { /* ignore */ }
+            return next;
+          });
+        } else if (key === "snippets_only") setUseSnippetsOnly((p) => !p);
+        else if (key === "safe_search") setSafeSearch((p) => !p);
+      },
+      searchFocus: () => {
+        searchRef.current?.querySelector<HTMLInputElement>("input")?.focus();
+      },
+      clearHistoryStateRefresh: () => {
+        setHistory([]);
+        setSessions([]);
+        setReport(null);
+        setMetadata(null);
+        setCurrentSearchId(null);
+        setCurrentExplain(null);
+        setEssenceText(null);
+        setRecalledMemories([]);
+        setBridgeSuggestions([]);
+      },
+    });
+    return unregister;
+  }, [registerHandlers]);
 
   useEffect(() => {
     fetch("/api/providers")
@@ -1589,13 +1624,7 @@ export default function SearchPage() {
 
         {/* Search Bar */}
         <div ref={searchRef} className="relative mb-6">
-          <div
-            className={`flex gap-3 rounded-2xl border p-2 shadow-xl transition-all duration-300 ${
-              isDark
-                ? "border-slate-700/60 bg-slate-800/40 shadow-slate-900/50 backdrop-blur-sm"
-                : "border-slate-200 bg-white/80 shadow-slate-200/50 backdrop-blur-sm"
-            }`}
-          >
+          <div className="glass flex gap-3 rounded-2xl border border-[var(--glass-border)] p-2 shadow-xl transition-all duration-300">
             <div className="relative flex flex-1 items-center gap-3 px-4">
               <Search className="h-5 w-5 shrink-0 text-slate-500" />
               <input
@@ -1660,9 +1689,7 @@ export default function SearchPage() {
 
           {showHistory && history.length > 0 && (
             <div
-              className={`absolute left-0 right-0 top-full z-20 mt-2 rounded-xl border p-2 shadow-xl ${
-                isDark ? "border-slate-700/60 bg-slate-800/95 backdrop-blur-md" : "border-slate-200 bg-white/95 backdrop-blur-md"
-              }`}
+              className="glass-card absolute left-0 right-0 top-full z-20 mt-2 border border-[var(--glass-border)] p-2 shadow-xl"
               role="listbox"
               aria-label="Search history"
             >
@@ -1694,7 +1721,7 @@ export default function SearchPage() {
         <PerspectiveDial value={perspectiveBias} onChange={setPerspectiveBias} isDark={isDark} />
 
         {/* Model Selector + Mode Buttons + Options */}
-        <div className={`mb-12 rounded-xl border ${isDark ? "border-slate-700/60 bg-slate-800/20" : "border-slate-200 bg-white/60"}`}>
+        <div className="glass-card mb-12 border border-[var(--glass-border)]">
           {/* Model Selector Dropdown */}
           <div className="px-6 pt-4 pb-3">
             <div className="mb-3 flex items-center justify-between">
@@ -2020,7 +2047,7 @@ export default function SearchPage() {
 
             {/* Token Usage Bar */}
             {tokenUsage && (
-              <div className={`flex flex-wrap items-center gap-4 rounded-2xl border px-6 py-4 ${isDark ? "border-slate-700/40 bg-slate-800/20" : "border-slate-200 bg-white/60"}`}>
+              <div className="glass-card flex flex-wrap items-center gap-4 border border-[var(--glass-border)] px-6 py-4">
                 <div className="flex items-center gap-2 text-sm text-slate-400">
                   <Activity className="h-4 w-4 text-cyan-500" />
                   <span className="font-medium">Token Usage</span>

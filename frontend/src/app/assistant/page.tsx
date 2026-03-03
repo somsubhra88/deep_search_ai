@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTheme } from "@/context/ThemeContext";
+import { useCommandPalette } from "@/context/CommandPaletteContext";
 import {
   loadFromStorage,
   compressAndStore,
@@ -519,11 +520,22 @@ function AssistantPageContent() {
       setGcalTokens(storedGcalTokens);
     }
     // Restore chat messages & persona from sessionStorage (survives Search ↔ Assistant navigation)
-    const savedChat = loadActiveChat();
-    if (savedChat) {
-      if (savedChat.messages?.length) setMessages(savedChat.messages as ChatMessage[]);
-      if (savedChat.activePersonaId && !bridgePreloadApplied.current) {
-        setActivePersonaId(savedChat.activePersonaId);
+    let skipRestore = false;
+    try {
+      if (sessionStorage.getItem("assistant-new-chat") === "1") {
+        sessionStorage.removeItem("assistant-new-chat");
+        clearActiveChat();
+        setMessages([]);
+        skipRestore = true;
+      }
+    } catch { /* ignore */ }
+    if (!skipRestore) {
+      const savedChat = loadActiveChat();
+      if (savedChat) {
+        if (savedChat.messages?.length) setMessages(savedChat.messages as ChatMessage[]);
+        if (savedChat.activePersonaId && !bridgePreloadApplied.current) {
+          setActivePersonaId(savedChat.activePersonaId);
+        }
       }
     }
   }, []);
@@ -548,6 +560,33 @@ function AssistantPageContent() {
     if (messages.length === 0) return;
     saveActiveChat({ messages, activePersonaId });
   }, [messages, activePersonaId]);
+
+  const { registerHandlers } = useCommandPalette();
+  useEffect(() => {
+    const unregister = registerHandlers({
+      assistantNewChat: () => {
+        clearActiveChat();
+        setMessages([]);
+      },
+      clearHistoryStateRefresh: () => {
+        setSessions([]);
+        setMessages([]);
+        persistTasks([]);
+        persistEvents([]);
+        setScannedFiles([]);
+        setScannedFolderName("");
+        setGmailTokens(null);
+        setGcalTokens(null);
+        try {
+          localStorage.removeItem(GMAIL_TOKENS_KEY);
+        } catch { /* ok */ }
+        try {
+          localStorage.removeItem(GCAL_TOKENS_KEY);
+        } catch { /* ok */ }
+      },
+    });
+    return unregister;
+  }, [registerHandlers, persistTasks, persistEvents]);
 
   const getIntent = useCallback(async (skill: SkillId, message: string): Promise<Record<string, unknown> | null> => {
     try {
@@ -1852,13 +1891,11 @@ function AssistantPageContent() {
       <div className="mx-auto flex h-[calc(100vh-72px)] max-w-7xl gap-0 px-4 py-4 lg:gap-4">
         {/* --- Sidebar: Skills & Quick Actions --- */}
         <aside
-          className={`shrink-0 transition-all duration-300 ${
+          className={`glass-card shrink-0 transition-all duration-300 ${
             skillPanelOpen ? "w-72 lg:w-80" : "w-0 overflow-hidden"
           } ${
             skillPanelOpen ? "max-lg:fixed max-lg:inset-y-0 max-lg:left-0 max-lg:z-20 max-lg:mt-[72px] max-lg:w-72 max-lg:shadow-2xl" : ""
-          } flex flex-col rounded-2xl border ${
-            isDark ? "border-slate-700/60 bg-slate-800/30" : "border-slate-200 bg-white/80"
-          }`}
+          } flex flex-col border border-[var(--glass-border)]`}
         >
           <div className="flex items-center justify-between border-b px-4 py-3" style={bd}>
             <h2 className="flex items-center gap-2 text-sm font-semibold">

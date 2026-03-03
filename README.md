@@ -1,66 +1,96 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/Deep_Search-AI_Agent-10b981?style=for-the-badge&logo=search&logoColor=white" alt="Deep Search AI Agent" />
-</p>
+<div align="center">
 
-<h1 align="center">🔬 Deep Search AI Agent</h1>
+# 🔬 Deep Search AI Agent
 
-<p align="center">
-  <strong>AI-powered research that goes deeper.</strong> Multi-agent architecture with self-reflection, claim verification, and RAG over your documents.
-</p>
+**AI-powered research that goes deeper.**
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js" />
-  <img src="https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&logo=fastapi" />
-  <img src="https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white" />
-  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white" />
-  <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" />
-</p>
+Multi-agent architecture · Self-reflection · Claim verification · RAG over your documents
 
----
+<br />
 
-## 📑 Table of Contents
+[![Version](https://img.shields.io/badge/version-0.2.0-6366f1?style=for-the-badge)](.)
+[![License](https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge)](.)
+[![Status](https://img.shields.io/badge/status-production--ready-0ea5e9?style=for-the-badge)](.)
 
-- [🎬 Video Demo](#-video-demo)
-- [✨ Features](#-features)
-- [🛠️ Tech Stack](#️-tech-stack)
-- [🚀 Quick Start](#-quick-start-docker)
-- [⚙️ Configuration](#-configuration)
-- [📁 Project Structure](#-project-structure)
-- [🔒 Security](#-security)
-- [📄 API Reference](#-api-reference)
-- [🤖 Assistant Usage](#-assistant-usage)
-- [📦 Distribution](#-distribution)
+<br />
+
+[Features](#-features) · [Quick Start](#-quick-start) · [API](#-api-reference) · [Security](#-security)
+
+</div>
 
 ---
 
-## 🎬 Video Demo
+<br />
 
-> **📹 Demo video coming soon!**  
-> A walkthrough of the Deep Search AI Agent will be uploaded here. Stay tuned for:
-> - Live research flow with multiple modes
-> - RAG Knowledge Base setup and Q&A
-> - Debate mode in action
-> - Assistant with real tool execution
+## 🎯 At a glance
 
-<!-- 
-  PLACEHOLDER: Add your video here when ready.
-  Example formats:
-  - YouTube: [![Demo](https://img.youtube.com/vi/YOUR_VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=YOUR_VIDEO_ID)
-  - Direct link: <video src="path/to/demo.mp4" controls width="100%"></video>
--->
+<table>
+<tr>
+<td width="33%" align="center"><strong>🔍 8 Research Modes</strong><br/><sub>Standard, Debate, Timeline, Academic, Fact Check, Deep Dive, Social, RAG</sub></td>
+<td width="33%" align="center"><strong>📚 RAG Knowledge Base</strong><br/><sub>PDF, DOCX, MD, TXT · Embeddings · Hybrid retrieval</sub></td>
+<td width="33%" align="center"><strong>🤖 6 Assistant Skills</strong><br/><sub>Tasks, Calendar, Files, Email, Research, Actions (Rust)</sub></td>
+</tr>
+</table>
+
+<br />
+
+## 🛠 Tech & stack
 
 <div align="center">
-  <img src="https://placehold.co/800x450/0f172a/64748b?text=Video+Demo+Coming+Soon&font=roboto" alt="Video placeholder" width="80%" style="border-radius: 12px; border: 2px dashed #475569;" />
+
+**Frontend & Backend**
+
+<img src="https://img.shields.io/badge/Next.js-16-000000?style=flat-square&logo=next.js&logoColor=white" alt="Next.js" />
+<img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square&logo=react&logoColor=black" alt="React" />
+<img src="https://img.shields.io/badge/Tailwind-4-38bdf8?style=flat-square&logo=tailwindcss&logoColor=black" alt="Tailwind" />
+<img src="https://img.shields.io/badge/FastAPI-0.115+-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
+<img src="https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python" />
+<img src="https://img.shields.io/badge/LangChain-🦜-1c3c3c?style=flat-square" alt="LangChain" />
+
+**Infrastructure & AI**
+
+<img src="https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker" />
+<img src="https://img.shields.io/badge/Redis-7-dc382d?style=flat-square&logo=redis&logoColor=white" alt="Redis" />
+<img src="https://img.shields.io/badge/SQLite-WAL-003b57?style=flat-square&logo=sqlite&logoColor=white" alt="SQLite" />
+<img src="https://img.shields.io/badge/Rust-Axum-dea584?style=flat-square&logo=rust&logoColor=black" alt="Rust" />
+<img src="https://img.shields.io/badge/OpenAI-GPT--4o-412991?style=flat-square&logo=openai&logoColor=white" alt="OpenAI" />
+<img src="https://img.shields.io/badge/Anthropic-Claude-cc785c?style=flat-square" alt="Anthropic" />
+<img src="https://img.shields.io/badge/Ollama-Local-000000?style=flat-square&logo=ollama&logoColor=white" alt="Ollama" />
+<img src="https://img.shields.io/badge/SSE-Streaming-8b5cf6?style=flat-square" alt="SSE" />
+
+</div>
+
+<br />
+
+## 📑 Table of contents
+
+| | | |
+|:---|:---|:---|
+| [🎬 Video demo](#-video-demo) | [✨ Features](#-features) | [🛠 Tech stack](#-tech--stack) |
+| [🏗 Architecture](#-architecture) | [🚀 Quick start](#-quick-start) | [⚙️ Configuration](#️-configuration) |
+| [📁 Project structure](#-project-structure) | [🔒 Security](#-security) | [📄 API reference](#-api-reference) |
+| [🤖 Assistant usage](#-assistant-usage) | [📦 Distribution](#-distribution) | [🏷️ Tags](#️-tags) |
+
+---
+
+## 🎬 Video demo
+
+<div align="center">
+
+<img src="https://placehold.co/800x400/0f172a/334155?text=▶+Video+Demo+Coming+Soon&font=inter" alt="Video demo placeholder" width="85%" />
+
+*Live research flow · RAG setup · Debate mode · Assistant with real tool execution*
+
 </div>
 
 ---
 
 ## ✨ Features
 
-### 🔍 Research Modes *(multi-select — combine them)*
+### 🔍 Research modes *(multi-select — combine any)*
 
 | Mode | Description |
-|------|-------------|
+|:-----|:------------|
 | **Standard** | Balanced research across diverse sources |
 | **Debate** | Adversarial pro vs. con analysis with confidence matrix |
 | **Timeline** | Chronological evolution and historical context |
@@ -70,178 +100,200 @@
 | **Social Media** | Community sentiment, trends, narratives, hashtag/account signals |
 | **RAG** | Knowledge Base Q&A: upload documents and ask grounded questions |
 
-### 📚 RAG / Knowledge Base
+---
 
-- Create and manage multiple Knowledge Bases
-- Upload files (PDF, DOCX, MD, TXT and more), import folders, or zip archives
-- Intelligent file detection via magic bytes, MIME sniffing, and heuristics
-- Content-hash caching (SHA-256) — re-uploading the same file is instant
-- Text extraction: PDF (PyMuPDF/pypdf), DOCX (python-docx), text with encoding detection
-- Chunking with sentence-aware splitting, overlap, and per-chunk deduplication
-- Persistent embeddings in SQLite (OpenAI or hash-based fallback)
-- Three retrieval scopes: **KB Only**, **Web Only**, **Hybrid** (default)
-- Conflict detection (KB vs. Web disagreements surfaced explicitly)
-- Citation verification pass and coverage gap analysis
+### 📚 RAG / Knowledge base
 
-### 🤖 AI Models
+| Capability | Details |
+|:-----------|:--------|
+| **Formats** | PDF, DOCX, MD, TXT; folders and zip archives |
+| **Ingest** | Magic-byte detection, MIME sniffing, content-hash (SHA-256) caching |
+| **Chunking** | Sentence-aware splitting, overlap, per-chunk deduplication |
+| **Embeddings** | Persistent in SQLite (OpenAI or hash-based fallback) |
+| **Retrieval** | **KB Only** · **Web Only** · **Hybrid** (default) |
+| **Quality** | Conflict detection (KB vs. Web), citation verification, coverage gap analysis |
 
-OpenAI, Anthropic, Grok, Mistral, Gemini, DeepSeek, Qwen (DashScope), Inception Labs, and local Ollama. First-run setup modal for provider selection and key entry.
+---
 
-### 🤖 AI Assistant
-
-A multi-skill assistant that can take real actions on your computer via a local Rust executor.
+### 🤖 AI assistant *(Rust executor)*
 
 | Skill | Description |
-|-------|-------------|
-| **Notes & Tasks** | Add, complete, and manage to-do items. Data persists locally in the browser. |
-| **Calendar** | Add events, view today's agenda, find free time slots, weekly overview. |
-| **Files & Folders** | Scan a local folder, list files by type (CSV, PDF, etc.), organise into subfolders, find large/duplicate/old files, generate archive and cleanup scripts. |
-| **Email** | Connect Gmail (OAuth, read-only) to summarise unread, clean newsletters, search inbox. |
-| **Research** | Query and synthesise findings from past Deep Search sessions. |
-| **Actions** | Execute real operations via the Rust executor: list/read/write/delete files, create/search notes, run shell commands, copy to clipboard. Destructive actions (delete, shell) require explicit approval. |
+|:------|:------------|
+| **Notes & Tasks** | Add, complete, manage to-dos; data persists in browser |
+| **Calendar** | Add events, today’s agenda, free slots, weekly overview |
+| **Files & Folders** | Scan folder, list by type, organise, find large/duplicate/old, generate scripts |
+| **Email** | Gmail (OAuth, read-only): summarise unread, search inbox |
+| **Research** | Query and synthesise past Deep Search sessions |
+| **Actions** | Real ops via executor: files, notes, shell, clipboard; R2/R3 need approval |
 
-**How it works:**
-1. User sends a natural-language message (e.g. "put data.csv in trash")
-2. The backend LLM selects the appropriate tool and parameters
-3. The Rust executor runs the tool with policy enforcement (risk levels R0-R3)
-4. Destructive actions (R2/R3) trigger an approval prompt in the UI
-5. Results stream back via SSE with undo support
+**Flow:** User message → LLM picks tool → Rust executor runs (R0–R3 policy) → Destructive actions show Approve/Deny in UI → Results via SSE, with undo.
 
-A **heartbeat** runs periodically (e.g. every 30 minutes); the LLM can surface alerts (e.g. many pending tasks, upcoming events) so the assistant feels proactive when the executor and skills are connected.
-
-### 🧠 Agentic Features
-
-- **Self-Reflection** — Critic agent evaluates report quality and triggers refinement
-- **Claim Verification** — Cross-references key claims against source material
-- **Adaptive Search Depth** — Automatically deepens research when results are sparse
-- **Follow-Up Questions** — Suggests next research directions you can click to explore
-- **Data Void Detection** — Warns about low-quality, echo-chamber, or unverified sources
-
-### ⚡ Core
-
-Live progress streaming via SSE • Search history and session persistence • Token usage tracking • Dark/light theme • Copy and download reports as Markdown • Keyboard shortcuts (⌘+Enter to search, Esc to cancel) • Safe search filtering • Snippets-only mode for restricted networks
+A **heartbeat** runs periodically; the LLM can surface alerts (e.g. pending tasks, upcoming events).
 
 ---
 
-## 🛠️ Tech Stack
+### 🧠 Agentic behaviour
+
+- **Self-reflection** — Critic agent evaluates report quality and triggers refinement  
+- **Claim verification** — Cross-checks key claims against sources  
+- **Adaptive search depth** — Deepens research when results are sparse  
+- **Follow-up questions** — Suggests next directions you can click  
+- **Data void detection** — Warns about low-quality or unverified sources  
+
+---
+
+### ⚡ Core UX
+
+SSE live streaming · Search history · Token usage · Dark/light theme · Copy/download Markdown · ⌘+Enter search, Esc cancel · Safe search · Snippets-only mode
+
+---
+
+## 🛠 Tech stack *(detail)*
 
 | Layer | Technology |
-|-------|------------|
+|:------|:-----------|
 | **Frontend** | Next.js 16, React 19, Tailwind CSS 4, Lucide Icons, Sonner |
 | **Backend** | FastAPI, Python 3.12+, LangChain, SSE |
-| **AI** | OpenAI GPT-4o / Anthropic / Qwen / Ollama / Inception, SerpAPI / Tavily |
-| **Storage** | SQLite (WAL mode) for debate sessions, knowledge bases, semantic cache |
-| **Executor** | Rust (Axum), 16 tools with sandbox, approval flows, undo/rollback |
-| **Deploy** | Docker Compose, multi-stage builds, Redis, Rust executor |
+| **AI** | OpenAI GPT-4o, Anthropic, Qwen, Ollama, Inception; SerpAPI / Tavily |
+| **Storage** | SQLite (WAL) for debate, KB, semantic cache |
+| **Cache** | Redis 7 |
+| **Executor** | Rust (Axum), 16 tools, sandbox, approval flows, undo/rollback |
+| **Deploy** | Docker Compose, multi-stage builds |
 
 ---
 
-## 🚀 Quick Start (Docker)
+## 🏗 Architecture
+
+```mermaid
+flowchart LR
+  subgraph Client
+    UI[Next.js Frontend]
+  end
+  subgraph Services
+    BE[FastAPI Backend]
+    EX[Rust Executor]
+    RD[(Redis)]
+  end
+  UI --> BE
+  BE --> RD
+  BE --> EX
+  EX -.-> FS[Files / Shell / Notes]
+```
+
+*Frontend → Backend (with Redis); Backend → Executor for assistant actions.*
+
+---
+
+## 🚀 Quick start
 
 ### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
-- API keys for an LLM provider and a search provider (SerpAPI or Tavily)
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose  
+- API keys: one LLM provider (e.g. OpenAI) and one search provider (SerpAPI or Tavily)
 
 ### 1. Clone and configure
 
 ```bash
 git clone <your-repo-url> deep-search-agent
 cd deep-search-agent
-
-# Create your config file
 make setup
-# or: cp .env.example .env
 ```
 
-Edit `.env` and add your API keys:
+Edit `.env` and set at least:
 
 ```env
 OPENAI_API_KEY=sk-your-openai-key
 SERPAPI_API_KEY=your-serpapi-key
 ```
 
-### 2. Start
+### 2. Start stack
 
 ```bash
 make start
-# or: docker compose up --build -d
 ```
 
-### 3. Use
+Starts **Redis** → **Executor** (Rust) → **Backend** (FastAPI) → **Frontend** (Next.js). Backend waits for Redis health.
 
-Open **http://localhost:3000** in your browser.
+### 3. Open app
 
-On first launch, complete the in-app setup flow:
-1. Choose LLM provider + model and provide API key (or Ollama base URL)
-2. Choose search provider (SerpAPI or Tavily) and provide key
-3. The backend applies settings immediately and persists to `.env` when writable
+| Environment | URL |
+|:------------|:----|
+| Default (compose) | **http://localhost:3001** |
+| If `FRONTEND_PORT=3000` in `.env` | **http://localhost:3000** |
 
-### Other commands
+On first launch: choose LLM + search provider and enter keys in the in-app setup; settings are persisted to `.env` when writable.
 
-```bash
-make stop        # Stop everything
-make restart     # Rebuild and restart
-make logs        # Follow live logs
-make status      # Check container health
-make clean       # Remove containers and images
-make dist        # Build clean shareable package in ./dist
-```
+> **Tip:** Run `make logs` to follow output; `make status` to check container health.
+
+---
+
+### Make commands
+
+| Command | Description |
+|:--------|:------------|
+| `make setup` | Create `.env` from template |
+| `make start` | Build and start all services |
+| `make stop` | Stop all services |
+| `make restart` | Rebuild and restart |
+| `make logs` | Follow all logs |
+| `make logs-backend` | Backend only |
+| `make logs-frontend` | Frontend only |
+| `make status` | Container health |
+| `make clean` | Remove containers, images, volumes |
+| `make dist` | Build shareable package in `./dist` |
+| `make dev-backend` | Run backend locally (no Docker) |
+| `make dev-frontend` | Run frontend locally (no Docker) |
 
 ---
 
 ## ⚙️ Configuration
 
-All settings are in `.env`. See `.env.example` for the full list with comments.
+All settings live in `.env`; see `.env.example` for the full list.
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `OPENAI_API_KEY` | Yes | — | OpenAI API key |
-| `OPENAI_MODEL` | No | `gpt-4o-mini` | OpenAI model name |
-| `SERPAPI_API_KEY` | Yes* | — | SerpAPI key (*or use Tavily) |
-| `SEARCH_PROVIDER` | No | `serpapi` | `serpapi` or `tavily` |
-| `TAVILY_API_KEY` | No | — | Tavily API key (if using Tavily) |
-| `SSL_VERIFY` | No | `true` | Set `false` for corporate proxies |
-| `BACKEND_PORT` | No | `8000` | Backend port (Docker) |
-| `FRONTEND_PORT` | No | `3000` | Frontend port (Docker) |
-| `EXECUTOR_URL` | No | `http://127.0.0.1:7777` | Rust executor URL. With Docker Compose, the backend uses `http://executor:7777` automatically. |
+|:---------|:--------:|:--------|:------------|
+| `OPENAI_API_KEY` | ✅ | — | OpenAI API key |
+| `OPENAI_MODEL` | | `gpt-4o-mini` | Model name |
+| `SERPAPI_API_KEY` | ✅* | — | SerpAPI key (*or Tavily) |
+| `SEARCH_PROVIDER` | | `serpapi` | `serpapi` or `tavily` |
+| `TAVILY_API_KEY` | | — | If using Tavily |
+| `SSL_VERIFY` | | `true` | Set `false` for corporate proxies |
+| `BACKEND_PORT` | | `8000` | Backend port |
+| `FRONTEND_PORT` | | `3000` / `3001` (compose) | Frontend port |
+| `REDIS_PORT` | | `6379` | Redis port |
+| `EXECUTOR_URL` | | `http://127.0.0.1:7777` | Executor URL (Docker: `http://executor:7777`) |
 
 ---
 
-## 📁 Project Structure
+## 📁 Project structure
 
 ```
 deep-search-agent/
-├── backend/               # FastAPI app, research pipeline, KB, debate
+├── backend/                 # FastAPI, research pipeline, KB, debate
 │   ├── app/
-│   │   ├── main.py                # Endpoints, rate limiting, security
-│   │   ├── agent.py               # Research pipeline, agentic features
-│   │   ├── assistant_agent.py     # LLM-based tool selection for assistant
-│   │   ├── executor_client.py     # Rust executor HTTP client
-│   │   ├── kb_*.py                # Knowledge Base models, ingest, retrieval
-│   │   ├── debate_engine.py       # Debate mode orchestrator
+│   │   ├── main.py          # Endpoints, rate limiting, security
+│   │   ├── agent.py         # Research pipeline, agentic features
+│   │   ├── assistant_agent.py
+│   │   ├── executor_client.py
+│   │   ├── kb_*.py          # Knowledge Base
+│   │   ├── debate_engine.py
 │   │   └── ...
 │   └── Dockerfile
-├── executor-rust/         # Rust local executor (Axum, 16 tools)
+├── executor-rust/           # Rust executor (Axum, 16 tools)
 │   ├── src/
-│   │   ├── main.rs                # HTTP server, approval flow, SSE events
-│   │   ├── models.rs              # Request/response types, tool enum
-│   │   ├── policy.rs              # Risk levels, workspace sandbox, ~ expansion
-│   │   ├── tools/                 # fs, shell, net, notes, clipboard, archive
-│   │   ├── approval.rs            # Pending approval store with oneshot channels
-│   │   ├── audit.rs               # JSONL audit logs with secret redaction
-│   │   ├── rollback.rs            # Undo/backup store
-│   │   ├── scheduler.rs           # SQLite-backed scheduled tasks
-│   │   └── config.rs              # Cross-OS storage paths
-│   ├── Cargo.toml
+│   │   ├── main.rs          # HTTP server, approval flow, SSE
+│   │   ├── policy.rs        # Risk R0–R3, sandbox
+│   │   ├── tools/           # fs, shell, notes, clipboard, etc.
+│   │   ├── approval.rs, audit.rs, rollback.rs, scheduler.rs
+│   │   └── ...
 │   └── Dockerfile
-├── frontend/              # Next.js app
+├── frontend/                # Next.js
 │   ├── src/app/
-│   │   ├── assistant/page.tsx     # Multi-skill assistant UI
-│   │   ├── search/page.tsx        # Research UI
-│   │   └── api/assistant/         # API route proxies (act, approve, status, heartbeat, events)
+│   │   ├── assistant/       # Assistant UI
+│   │   ├── search/          # Research UI
+│   │   └── api/assistant/   # Proxies (act, approve, heartbeat, events)
 │   └── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml       # Redis, executor, backend, frontend
 ├── Makefile
 └── README.md
 ```
@@ -250,33 +302,34 @@ deep-search-agent/
 
 ## 🔒 Security
 
-- **SSRF protection** — Blocks requests to private IPs and internal networks
-- **Per-IP rate limiting** — 10 requests/minute
-- **Input validation** — Query sanitization, UUID validation for run IDs, control character stripping
-- **Security headers** — CSP, X-Frame-Options, X-Content-Type-Options, etc.
-- **Error sanitization** — No API keys or paths leaked in responses
-- **Proxy headers** — Trusted only when explicitly enabled and allowlisted
-- **Non-root Docker** — Containers run as non-root
-- **Secrets excluded** — `.env` and API keys excluded from images via `.dockerignore`
-- **Executor sandbox** — Workspace-scoped file access, `~` expansion with home-dir validation, path traversal prevention
-- **Risk-based approval** — Tools classified R0 (read) to R3 (shell/download); R2+ require user approval
-- **Audit logging** — All tool executions logged to JSONL with automatic secret redaction
-- **Download safety** — URL scheme validation (http/https only), localhost/private host blocking
-- **Shell limits** — Command length capped at 8KB, notes title/folder sanitized against traversal
+| Area | Measures |
+|:-----|:---------|
+| **Network** | SSRF protection; blocks private IPs and internal networks |
+| **Rate limiting** | Per-IP, 10 req/min |
+| **Input** | Query sanitization, UUID validation, control-char stripping |
+| **Headers** | CSP, X-Frame-Options, X-Content-Type-Options, etc. |
+| **Errors** | No API keys or paths in responses |
+| **Docker** | Non-root; `.env` excluded via `.dockerignore` |
+| **Executor** | Workspace sandbox, path traversal prevention, R0–R3 approval |
+| **Audit** | JSONL logs with secret redaction |
+| **Download** | http/https only; no localhost/private hosts |
+| **Shell** | Command length cap 8KB; sanitized notes paths |
 
-> ⚠️ **Never commit `.env`** — It contains API keys. Ensure it is in `.gitignore`.
+> ⚠️ **Do not commit `.env`** — it contains API keys. Keep it in `.gitignore`.
 
 ---
 
-## 📄 API Reference
+## 📄 API reference
 
-### `GET /health`
+### Health
 
-Returns `{"status": "ok", "version": "0.2.0"}`.
+**`GET /health`** → `{"status": "ok", "version": "0.2.0"}`
 
-### `POST /api/research`
+---
 
-Streams research progress via Server-Sent Events.
+### Research
+
+**`POST /api/research`** — Streams progress via SSE.
 
 ```json
 {
@@ -288,40 +341,46 @@ Streams research progress via Server-Sent Events.
 }
 ```
 
-**Modes**: `standard`, `debate`, `timeline`, `academic`, `fact_check`, `deep_dive`, `social_media`, `rag`  
-**Models**: `openai`, `anthropic`, `grok`, `mistral`, `gemini`, `deepseek`, `qwen`, `ollama`, `inception`
+**Modes:** `standard` · `debate` · `timeline` · `academic` · `fact_check` · `deep_dive` · `social_media` · `rag`  
+**Models:** `openai` · `anthropic` · `grok` · `mistral` · `gemini` · `deepseek` · `qwen` · `ollama` · `inception`
 
-### Knowledge Base Endpoints
+---
+
+### Knowledge base
 
 | Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/kb/create` | Create a knowledge base |
-| `GET` | `/api/kb/list` | List all knowledge bases |
-| `GET` | `/api/kb/{kb_id}/docs` | List documents in a KB |
-| `DELETE` | `/api/kb/{kb_id}` | Delete a knowledge base |
+|:-------|:---------|:------------|
+| `POST` | `/api/kb/create` | Create KB |
+| `GET` | `/api/kb/list` | List KBs |
+| `GET` | `/api/kb/{kb_id}/docs` | List docs in KB |
+| `DELETE` | `/api/kb/{kb_id}` | Delete KB |
 | `POST` | `/api/kb/{kb_id}/upload` | Upload files (multipart) |
-| `POST` | `/api/kb/{kb_id}/upload-zip` | Upload and extract zip archive |
+| `POST` | `/api/kb/{kb_id}/upload-zip` | Upload zip |
 
-### RAG Query
+---
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/rag/query` | Synchronous RAG query |
-| `POST` | `/api/rag/query/stream` | SSE streaming RAG query |
-
-**Scopes**: `KB_ONLY`, `WEB_ONLY`, `HYBRID` (default)
-
-### Assistant Endpoints
+### RAG
 
 | Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/assistant/status` | Check if the Rust executor is available |
-| `POST` | `/api/assistant/act` | Execute an action from a natural-language message |
-| `POST` | `/api/assistant/approve` | Approve or deny a pending destructive action |
-| `POST` | `/api/assistant/heartbeat` | Autonomous heartbeat check (context: tasks, calendar, etc.; returns ok or alert) |
-| `GET` | `/api/assistant/runs/{run_id}/events` | SSE stream for run events (approval prompts, results) |
+|:-------|:---------|:------------|
+| `POST` | `/api/rag/query` | Sync RAG query |
+| `POST` | `/api/rag/query/stream` | SSE streaming |
 
-**Act request:**
+**Scopes:** `KB_ONLY` · `WEB_ONLY` · `HYBRID` (default)
+
+---
+
+### Assistant
+
+| Method | Endpoint | Description |
+|:-------|:---------|:------------|
+| `GET` | `/api/assistant/status` | Executor available? |
+| `POST` | `/api/assistant/act` | Execute from natural-language message |
+| `POST` | `/api/assistant/approve` | Approve/deny destructive action |
+| `POST` | `/api/assistant/heartbeat` | Heartbeat (tasks, calendar context) |
+| `GET` | `/api/assistant/runs/{run_id}/events` | SSE run events |
+
+**Act body example:**
 
 ```json
 {
@@ -331,112 +390,68 @@ Streams research progress via Server-Sent Events.
 }
 ```
 
-**Available tools**: `fs_list`, `fs_read`, `fs_stat`, `fs_write`, `fs_append`, `fs_copy`, `fs_move`, `fs_rename`, `fs_delete`, `net_download`, `archive_extract`, `shell_run`, `notes_create`, `notes_update`, `notes_search`, `clipboard_read`, `clipboard_write`
-
-### Executor (Rust)
-
-The executor is a separate service that the backend calls for Assistant **Actions** (file ops, notes, shell, clipboard).
-
-- **Docker**: Runs as the `executor` service, listens on `0.0.0.0:7777` so the backend container can reach it at `http://executor:7777`. Started automatically with `make start` / `docker compose up`.
-- **Local**: Run `cd executor-rust && cargo run`. It binds to `127.0.0.1:7777` by default. Set `HOST=0.0.0.0` to listen on all interfaces; set `PORT` to use a different port.
-
-The executor provides:
-
-- **16 tools** with workspace sandbox enforcement
-- **Policy engine** — R0-R3 risk classification, rule-based auto-allow/deny
-- **Approval flow** — Destructive actions pause and wait for user confirmation via SSE
-- **Undo/rollback** — File operations create backups; undo via `/v1/undo`
-- **Scheduled tasks** — SQLite-backed scheduler for deferred tool execution
-- **Audit trail** — JSONL logs per run with automatic secret redaction
+**Tools:** `fs_list`, `fs_read`, `fs_stat`, `fs_write`, `fs_append`, `fs_copy`, `fs_move`, `fs_rename`, `fs_delete`, `net_download`, `archive_extract`, `shell_run`, `notes_*`, `clipboard_read`, `clipboard_write`
 
 ---
 
-## 🤖 Assistant Usage
+### Executor (Rust)
 
-The Assistant is available at `/assistant` in the web UI. It provides six skills accessible from the sidebar.
+- **Docker:** Service `executor`, `http://executor:7777`, started with `make start`.  
+- **Local:** `cd executor-rust && cargo run` (binds `127.0.0.1:7777`).
+
+Provides: 16 tools, R0–R3 policy, approval flow, undo/rollback, scheduler, JSONL audit with redaction.
+
+---
+
+## 🤖 Assistant usage
+
+Assistant UI: **http://localhost:3000/assistant** (or your `FRONTEND_PORT`). Six skills in the sidebar.
 
 ### Getting started
 
-1. **Start the stack**
-   - **Docker (recommended)**: `make start` or `docker compose up --build`. The backend, frontend, and **Rust executor** all start; the Actions skill will show as connected once the executor is ready.
-   - **Local**: Start the backend and frontend, then start the executor so Actions work: `cd executor-rust && cargo run` (listens on `127.0.0.1:7777`).
-2. Navigate to **http://localhost:3000/assistant** (or the port set by `FRONTEND_PORT` in Docker).
-3. Select a skill from the sidebar and start chatting.
+1. **Docker:** `make start` — backend, frontend, Redis, executor all start; Actions show “Ready” when executor is up.  
+2. **Local:** Start backend + frontend, then `cd executor-rust && cargo run` for Actions.  
+3. Open `/assistant`, pick a skill, and chat.
 
-If the **Actions** skill shows “Start the executor to enable real actions”, the backend cannot reach the executor. With Docker, ensure all services are up; locally, run the executor in a separate terminal.
+If Actions says *“Start the executor to enable real actions”*, the backend cannot reach the executor (check services or run executor locally).
 
-### Files & Folders skill
+### Skills in short
 
-1. Click **"Scan a folder"** and select a folder (e.g. Downloads)
-2. Ask natural-language questions:
-   - "List CSV files" / "Please list down the CSV files"
-   - "Organise my files into subfolders"
-   - "Generate a script to archive old stale files"
-   - "Remove large files" / "Generate script for large files"
-   - "Remove duplicates"
-3. The assistant generates ready-to-run bash scripts you can copy and execute
+| Skill | Example prompts |
+|:------|:----------------|
+| **Tasks** | “Add task: Buy groceries”, “Show my tasks”, “Complete #1” |
+| **Calendar** | “Add event: Standup tomorrow 10am”, “Today’s agenda”, “Free slots” |
+| **Files & Folders** | “Scan a folder” → “List CSV files”, “Organise into subfolders”, “Script to archive old files” |
+| **Email** | Connect Gmail → “Summarise unread”, “Search for project deadline” |
+| **Research** | Query past Deep Search sessions |
+| **Actions** | “List files in ~/Downloads”, “Read ~/notes.txt”, “Put data.csv in trash” (approval), “Run ls -la” (approval) |
 
-### Actions skill (requires executor)
-
-The Actions skill runs real operations (files, notes, shell, clipboard) via the **Rust executor**.
-
-- **With Docker**: The executor runs as a service; no extra step. The UI shows “Ready” when it’s connected.
-- **Local (no Docker)**: In a separate terminal run:
-  ```bash
-  cd executor-rust && cargo run
-  ```
-  The executor listens on `127.0.0.1:7777`. The backend uses `EXECUTOR_URL` (default `http://127.0.0.1:7777`).
-
-Example commands:
-- "List files in ~/Downloads"
-- "Read the file ~/notes.txt"
-- "Put data.csv in trash" (requires approval)
-- "Create a note titled Meeting Notes with content ..."
-- "Search notes for project"
-- "Run ls -la in ~/Documents" (requires approval)
-
-Destructive actions show an **Approve / Deny** prompt at the bottom of the chat.
-
-### Tasks skill
-
-- "Add task: Buy groceries"
-- "Show my tasks"
-- "Complete Buy groceries" or "Done #1"
-- "Clear completed"
-- "What's next?"
-
-### Calendar skill
-
-- "Add event: Team standup tomorrow at 10am"
-- "Today's agenda"
-- "This week"
-- "Free slots"
-
-### Email skill
-
-1. Click **"Connect Email"** in the sidebar
-2. Sign in with Google (read-only OAuth)
-3. "Summarise my unread emails"
-4. "Search for emails about project deadline"
+Destructive actions show **Approve / Deny** at the bottom of the chat.
 
 ---
 
 ## 📦 Distribution
 
-Build a clean distributable package (no secrets, no build artifacts):
-
 ```bash
 make dist
 ```
 
-Outputs:
-- `dist/deep-search-agent/` — Clean project copy
-- `dist/deep-search-agent.tar.gz` — Archive to share
-
-Before sharing, verify `.env` is not included and no API keys are present.
+Produces `dist/deep-search-agent/` and `dist/deep-search-agent.tar.gz`. Ensure `.env` is not included before sharing.
 
 ---
 
-## License
+## 🏷️ Tags
 
-**MIT**
+<div align="center">
+
+`ai-agent` · `research` · `rag` · `knowledge-base` · `llm` · `openai` · `anthropic` · `ollama` · `langchain` · `fastapi` · `nextjs` · `react` · `rust` · `docker` · `redis` · `sqlite` · `semantic-search` · `embeddings` · `sse` · `streaming` · `debate` · `fact-check` · `academic` · `serpapi` · `tavily` · `assistant` · `tools` · `executor` · `multi-agent` · `self-reflection` · `claim-verification` · `pdf` · `docx` · `chunking` · `tailwind` · `typescript` · `python` · `axum` · `mit-license`
+
+</div>
+
+---
+
+<div align="center">
+
+**License** — [MIT](.)
+
+</div>

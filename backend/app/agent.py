@@ -141,6 +141,11 @@ def clear_llm_cache() -> None:
     _llm_cache.clear()
 
 
+def clear_search_cache() -> None:
+    """Clear the in-memory search result cache."""
+    _search_cache.clear()
+
+
 def _get_llm(model_id: str = "openai", model_name: str | None = None) -> BaseChatModel:
     """Get or create an LLM instance for the given model ID."""
     cache_key = f"{model_id}:{(model_name or '').strip().lower()}"
@@ -300,6 +305,12 @@ class SearchCache:
             "size": len(self._cache),
             "hit_rate": f"{self._hits / max(1, self._hits + self._misses):.0%}",
         }
+
+    def clear(self) -> None:
+        """Clear all cached search results."""
+        self._cache.clear()
+        self._hits = 0
+        self._misses = 0
 
 
 _search_cache = SearchCache()
