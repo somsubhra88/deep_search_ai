@@ -192,7 +192,7 @@ VALID_MODES = {
     "rag",
 }
 VALID_MODELS = {"openai", "anthropic", "grok", "mistral", "gemini", "deepseek", "qwen", "ollama", "inception"}
-VALID_SEARCH_PROVIDERS = {"serpapi", "tavily"}
+VALID_SEARCH_PROVIDERS = {"serpapi", "tavily", "searxng"}
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() in {"1", "true", "yes"}
 _TRUSTED_PROXY_IPS = {
     ip.strip()
@@ -209,6 +209,7 @@ class ResearchRequest(BaseModel):
     model_id: str = os.getenv("DEFAULT_MODEL_PROVIDER", "openai")
     model_name: str | None = None
     mode_settings: dict | None = None
+    search_provider: str | None = None
 
     @field_validator("query")
     @classmethod
@@ -237,6 +238,20 @@ class ResearchRequest(BaseModel):
     def validate_model(cls, v: str) -> str:
         if v not in VALID_MODELS:
             raise ValueError(f"Invalid model. Must be one of: {', '.join(VALID_MODELS)}")
+        return v
+
+    @field_validator("search_provider")
+    @classmethod
+    def validate_search_provider(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if v.strip() == "":
+            return None
+        v = v.strip().lower()
+        if v not in VALID_SEARCH_PROVIDERS:
+            raise ValueError(
+                f"Invalid search_provider. Must be one of: {', '.join(sorted(VALID_SEARCH_PROVIDERS))}"
+            )
         return v
 
 
@@ -276,9 +291,9 @@ class SetupRequest(BaseModel):
 
     @field_validator("search_api_key")
     @classmethod
-    def validate_search_api_key(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
+    def validate_search_api_key(cls, v: str, info) -> str:
+        v = v.strip() if v else ""
+        if not v and info.data.get("search_provider") != "searxng":
             raise ValueError("search_api_key cannot be empty")
         return v
 
@@ -480,6 +495,26 @@ async def list_providers():
     return providers
 
 
+@app.get("/api/ollama/models")
+async def list_ollama_models():
+    """Return list of model names from local Ollama (GET /api/tags). Updates automatically when you pull new models."""
+    base_url = (os.getenv("OLLAMA_BASE_URL") or "http://host.docker.internal:11434/v1").rstrip("/")
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+    tags_url = f"{base_url}/api/tags"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(tags_url)
+            r.raise_for_status()
+            data = r.json()
+    except (httpx.HTTPError, json.JSONDecodeError, KeyError) as e:
+        logger.debug("Ollama models fetch failed: %s", e)
+        return {"models": []}
+    models = data.get("models") or []
+    names = [m.get("name") for m in models if isinstance(m, dict) and m.get("name")]
+    return {"models": names}
+
+
 @app.post("/api/providers/inception/test")
 async def test_inception_provider():
     api_key = os.getenv("INCEPTION_API_KEY")
@@ -524,8 +559,10 @@ async def setup_runtime_config(body: SetupRequest):
 
     if body.search_provider == "serpapi":
         env_updates["SERPAPI_API_KEY"] = body.search_api_key
-    else:
+    elif body.search_provider == "tavily":
         env_updates["TAVILY_API_KEY"] = body.search_api_key
+    elif body.search_provider == "searxng":
+        pass
 
     _PROVIDER_ENV_MAP = {
         "openai":    {"model_env": "OPENAI_MODEL",    "key_env": "OPENAI_API_KEY"},
@@ -617,6 +654,7 @@ async def research(request: Request, body: ResearchRequest):
                 model_name=model_name,
                 recalled_memories=recalled_memories,
                 mode_settings=body.mode_settings,
+                search_provider=body.search_provider,
             ):
                 if await request.is_disconnected():
                     logger.info("Client disconnected, stopping research")

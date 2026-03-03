@@ -274,12 +274,12 @@ class SearchCache:
         self._hits = 0
         self._misses = 0
 
-    def _key(self, query: str, num: int, safe: bool) -> str:
-        raw = f"{query.lower().strip()}|{num}|{safe}"
+    def _key(self, query: str, num: int, safe: bool, provider: str = "") -> str:
+        raw = f"{query.lower().strip()}|{num}|{safe}|{provider}"
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
-    def get(self, query: str, num: int = 5, safe: bool = True) -> list[dict] | None:
-        key = self._key(query, num, safe)
+    def get(self, query: str, num: int = 5, safe: bool = True, provider: str = "") -> list[dict] | None:
+        key = self._key(query, num, safe, provider)
         if key in self._cache:
             ts, results = self._cache[key]
             if time.time() - ts < self._ttl:
@@ -290,8 +290,8 @@ class SearchCache:
         self._misses += 1
         return None
 
-    def put(self, query: str, num: int, safe: bool, results: list[dict]):
-        key = self._key(query, num, safe)
+    def put(self, query: str, num: int, safe: bool, results: list[dict], provider: str = ""):
+        key = self._key(query, num, safe, provider)
         self._cache[key] = (time.time(), results)
         self._cache.move_to_end(key)
         if len(self._cache) > self._max_size:
@@ -566,6 +566,45 @@ Rules:
 
 
 # ---------------------------------------------------------------------------
+# Circuit breaker for SearxNG (avoid hammering a failing service)
+# ---------------------------------------------------------------------------
+
+class _SearxNGCircuitBreaker:
+    """In-memory circuit breaker: after max_failures, open for cooldown_seconds."""
+
+    def __init__(self, max_failures: int = 3, cooldown_seconds: float = 60.0):
+        self._max_failures = max_failures
+        self._cooldown = cooldown_seconds
+        self._failures = 0
+        self._last_failure_time: float | None = None
+
+    def is_open(self) -> bool:
+        if self._failures < self._max_failures:
+            return False
+        if self._last_failure_time is None:
+            return False
+        if time.time() - self._last_failure_time >= self._cooldown:
+            self._failures = 0
+            self._last_failure_time = None
+            return False
+        return True
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._last_failure_time = None
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        self._last_failure_time = time.time()
+
+
+_searxng_circuit = _SearxNGCircuitBreaker(
+    max_failures=int(os.getenv("SEARXNG_CIRCUIT_MAX_FAILURES", "3")),
+    cooldown_seconds=float(os.getenv("SEARXNG_CIRCUIT_COOLDOWN_SECONDS", "60")),
+)
+
+
+# ---------------------------------------------------------------------------
 # Search (with caching)
 # ---------------------------------------------------------------------------
 
@@ -636,20 +675,111 @@ def _tavily_search(query: str, num: int = 5) -> list[dict]:
     return results
 
 
-def _search(query: str, num: int = 5, safe_search: bool = True) -> list[dict]:
-    cached = _search_cache.get(query, num, safe_search)
+def _normalize_searxng_result(item: dict, query: str) -> dict:
+    """Normalize a single SearXNG result to the common search result schema."""
+    url = item.get("url") or ""
+    title = item.get("title") or ""
+    content = item.get("content") or ""
+    engine = item.get("engine")
+    published = item.get("publishedDate")
+    return {
+        "title": title,
+        "snippet": content,
+        "url": url,
+        "query": query,
+        "source": "searxng",
+        "engine": engine,
+        "published_at": published,
+    }
+
+
+def _searxng_search(query: str, num: int = 5, safe_search: bool = True) -> list[dict]:
+    base_url = os.getenv("SEARXNG_URL", "").rstrip("/")
+    if not base_url:
+        raise RuntimeError("SEARXNG_URL is not set in .env")
+
+    if _searxng_circuit.is_open():
+        raise RuntimeError("SearxNG circuit breaker is open; try again later")
+
+    timeout_sec = float(os.getenv("SEARXNG_TIMEOUT_SECONDS", "10"))
+    categories = os.getenv("SEARXNG_CATEGORIES", "general")
+    safesearch_val = os.getenv("SEARXNG_SAFESEARCH", "1" if safe_search else "0")
+    if isinstance(safesearch_val, str) and safesearch_val.isdigit():
+        safesearch_int = int(safesearch_val)
+    else:
+        safesearch_int = 1 if safe_search else 0
+
+    params = {
+        "q": query,
+        "format": "json",
+        "categories": categories,
+        "safesearch": safesearch_int,
+    }
+    url = f"{base_url}/search"
+    seen_urls: set[str] = set()
+    results: list[dict] = []
+
+    for attempt in range(2):
+        try:
+            resp = _http_client.get(url, params=params, timeout=timeout_sec)
+            resp.raise_for_status()
+            data = resp.json()
+            _searxng_circuit.record_success()
+            raw_results = data.get("results") or []
+            for item in raw_results[: num * 2]:
+                norm = _normalize_searxng_result(item, query)
+                u = norm.get("url") or ""
+                if u and u not in seen_urls:
+                    seen_urls.add(u)
+                    results.append(norm)
+                    if len(results) >= num:
+                        break
+            return results[:num]
+        except (httpx.TimeoutException, httpx.HTTPStatusError) as e:
+            _searxng_circuit.record_failure()
+            if attempt == 0:
+                logger.warning("SearxNG request failed (attempt %s): %s", attempt + 1, e)
+                continue
+            raise
+        except Exception as e:
+            _searxng_circuit.record_failure()
+            if attempt == 0:
+                logger.warning("SearxNG request failed (attempt %s): %s", attempt + 1, e)
+                continue
+            raise
+    return results
+
+
+def _search(query: str, num: int = 5, safe_search: bool = True, provider: str | None = None) -> list[dict]:
+    resolved = (provider or os.getenv("SEARCH_PROVIDER_DEFAULT") or os.getenv("SEARCH_PROVIDER") or "serpapi").lower()
+    cached = _search_cache.get(query, num, safe_search, resolved)
     if cached is not None:
         logger.info("Cache HIT for query: %s", query[:50])
         return cached
 
-    provider = os.getenv("SEARCH_PROVIDER", "serpapi").lower()
-    if provider == "tavily":
-        results = _tavily_search(query, num=num)
-    else:
-        results = _serpapi_search(query, num=num, safe_search=safe_search)
+    fallbacks_str = os.getenv("SEARCH_PROVIDER_FALLBACKS", "").strip()
+    fallback_list = [p.strip().lower() for p in fallbacks_str.split(",") if p.strip()] if fallbacks_str else []
+    providers_to_try = [resolved] + [p for p in fallback_list if p != resolved]
 
-    _search_cache.put(query, num, safe_search, results)
-    return results
+    last_error: Exception | None = None
+    for prov in providers_to_try:
+        try:
+            if prov == "searxng":
+                results = _searxng_search(query, num=num, safe_search=safe_search)
+            elif prov == "tavily":
+                results = _tavily_search(query, num=num)
+            else:
+                results = _serpapi_search(query, num=num, safe_search=safe_search)
+            _search_cache.put(query, num, safe_search, results, resolved)
+            return results
+        except Exception as e:
+            last_error = e
+            logger.warning("Search provider %s failed for query %s: %s", prov, query[:50], e)
+            if not fallback_list:
+                raise
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -1047,6 +1177,7 @@ Return ONLY valid JSON array:
 async def _run_debate_flow(
     query: str, use_snippets_only: bool, safe_search: bool,
     emit_step, budget: TokenBudget = None, active_llm: ChatOpenAI = None,
+    search_provider: str | None = None,
 ) -> tuple[list[dict], list[dict], dict]:
     active_llm = active_llm or llm
     await emit_step("debate", "Agent A (Proponent): Generating queries for supporting evidence...")
@@ -1078,7 +1209,7 @@ Output ONLY a JSON array of strings. Example: ["X drawbacks", "X criticisms", "e
     async def gather_evidence(queries: list[str]) -> list[dict]:
         all_r: list[dict] = []
         for q in queries:
-            results = await asyncio.to_thread(_search, q, num=3, safe_search=safe_search)
+            results = await asyncio.to_thread(_search, q, num=3, safe_search=safe_search, provider=search_provider)
             all_r.extend(results)
         seen: set[str] = set()
         unique = []
@@ -1344,6 +1475,7 @@ async def run_research_agent(
     model_name: str | None = None,
     recalled_memories: list[dict] | None = None,
     mode_settings: dict | None = None,
+    search_provider: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     step_ctx = "unknown"
     budget = TokenBudget()
@@ -1399,7 +1531,7 @@ async def run_research_agent(
         all_results: list[dict] = []
         for i, q in enumerate(queries):
             yield await _emit_step("searching", f"Searching for: {q[:50]}...")
-            results = await asyncio.to_thread(_search, q, num=MAX_SOURCES_PER_SEARCH, safe_search=safe_search)
+            results = await asyncio.to_thread(_search, q, num=MAX_SOURCES_PER_SEARCH, safe_search=safe_search, provider=search_provider)
             all_results.extend(results)
             yield await _emit_step("search_done", f"Found {len(results)} results for query {i+1}")
 
@@ -1425,7 +1557,7 @@ async def run_research_agent(
                 is_social=is_social, budget=budget, active_llm=active_llm,
             )
             for q in extra_queries[:2]:
-                results = await asyncio.to_thread(_search, q, num=MAX_SOURCES_PER_SEARCH, safe_search=safe_search)
+                results = await asyncio.to_thread(_search, q, num=MAX_SOURCES_PER_SEARCH, safe_search=safe_search, provider=search_provider)
                 for r in results:
                     if r.get("url") and r["url"] not in seen:
                         seen.add(r["url"])
@@ -1598,7 +1730,7 @@ Instructions:{mode_instructions}{safe_instruction}"""
             if refinement_queries:
                 yield await _emit_step("refining", "Quality below threshold — running refinement pass...")
                 for q in refinement_queries:
-                    extra = await asyncio.to_thread(_search, q, num=3, safe_search=safe_search)
+                    extra = await asyncio.to_thread(_search, q, num=3, safe_search=safe_search, provider=search_provider)
                     for r in extra:
                         if r.get("url") and r["url"] not in seen:
                             seen.add(r["url"])
@@ -1632,6 +1764,7 @@ Instructions:{mode_instructions}{safe_instruction}"""
                 query, use_snippets_only, safe_search,
                 emit_step=lambda s, d: _emit_step(s, d),
                 budget=budget, active_llm=active_llm,
+                search_provider=search_provider,
             )
             metadata["confidence_matrix"] = confidence_matrix
 

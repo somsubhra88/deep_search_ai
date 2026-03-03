@@ -68,8 +68,8 @@ Multi-agent architecture · Self-reflection · Claim verification · RAG over yo
 |:---|:---|:---|
 | [🎬 Video demo](#-video-demo) | [✨ Features](#-features) | [🛠 Tech stack](#-tech--stack) |
 | [🏗 Architecture](#-architecture) | [🚀 Quick start](#-quick-start) | [⚙️ Configuration](#️-configuration) |
-| [📁 Project structure](#-project-structure) | [🔒 Security](#-security) | [📄 API reference](#-api-reference) |
-| [🤖 Assistant usage](#-assistant-usage) | [📦 Distribution](#-distribution) | [🏷️ Tags](#️-tags) |
+| [🦙 Ollama (local)](#-ollama-local-mode) | [📁 Project structure](#-project-structure) | [🔒 Security](#-security) |
+| [📄 API reference](#-api-reference) | [🤖 Assistant usage](#-assistant-usage) | [📦 Distribution](#-distribution) · [🏷️ Tags](#️-tags) |
 
 ---
 
@@ -255,13 +255,95 @@ All settings live in `.env`; see `.env.example` for the full list.
 | `OPENAI_API_KEY` | ✅ | — | OpenAI API key |
 | `OPENAI_MODEL` | | `gpt-4o-mini` | Model name |
 | `SERPAPI_API_KEY` | ✅* | — | SerpAPI key (*or Tavily) |
-| `SEARCH_PROVIDER` | | `serpapi` | `serpapi` or `tavily` |
+| `SEARCH_PROVIDER` | | `serpapi` | `serpapi`, `tavily`, or `searxng` |
 | `TAVILY_API_KEY` | | — | If using Tavily |
+| `SEARXNG_URL` | | — | Base URL of SearxNG instance (e.g. `http://searxng:8080` in Docker) |
+| `SEARXNG_TIMEOUT_SECONDS` | | `10` | Request timeout for SearxNG |
+| `SEARCH_PROVIDER_DEFAULT` | | — | Default provider when not set per request (falls back to `SEARCH_PROVIDER`) |
+| `SEARCH_PROVIDER_FALLBACKS` | | — | Optional comma-separated list (e.g. `tavily,serpapi`) to try if primary fails |
 | `SSL_VERIFY` | | `true` | Set `false` for corporate proxies |
 | `BACKEND_PORT` | | `8000` | Backend port |
 | `FRONTEND_PORT` | | `3000` / `3001` (compose) | Frontend port |
 | `REDIS_PORT` | | `6379` | Redis port |
 | `EXECUTOR_URL` | | `http://127.0.0.1:7777` | Executor URL (Docker: `http://executor:7777`) |
+
+---
+
+## 🦙 Ollama (local mode)
+
+Use [Ollama](https://ollama.com) to run open-source LLMs locally with no API keys. The app discovers models from your Ollama instance automatically.
+
+### Installing Ollama
+
+1. **Download and install** from [ollama.com](https://ollama.com) (macOS, Linux, Windows).
+2. **Start Ollama** — it usually runs in the background after install. To start the server manually:
+   ```bash
+   ollama serve
+   ```
+3. **Pull a model** (e.g. Phi, Llama, Mistral):
+   ```bash
+   ollama pull phi
+   ollama list   # list installed models
+   ```
+
+### Using Ollama with this app
+
+1. **Set your default provider and model** in `.env`:
+   ```env
+   DEFAULT_MODEL_PROVIDER=ollama
+   OLLAMA_MODEL=phi
+   OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+   ```
+   - If the app runs **in Docker** (e.g. `make start`), use `http://host.docker.internal:11434/v1` so containers can reach Ollama on your host.
+   - If the app runs **on the host** (no Docker), use `http://localhost:11434/v1`.
+
+2. **In the app:** Open the setup modal, choose **Ollama (Local)** as the LLM provider, and pick a model. The model list is loaded from Ollama and updates when you pull new models — no rebuild needed.
+
+3. **Optional:** You can change the Ollama base URL in the setup form (e.g. for a remote Ollama server).
+
+---
+
+## SearxNG (self-hosted search)
+
+Use a self-hosted [SearxNG](https://docs.searxng.org/) metasearch engine as the web search provider. No API key is required; the service runs inside Docker and is not exposed to the host by default.
+
+### Starting SearxNG with Docker Compose
+
+Run the full stack (including SearxNG) with:
+
+```bash
+docker compose up
+```
+
+This starts `searxng`, `backend`, and `frontend`. The SearxNG container listens on port 8080 **inside** the Docker network only; no host port is published, so the search engine is not reachable from your machine except via the app.
+
+### Environment variables
+
+| Variable | Description |
+|:---------|:------------|
+| `SEARXNG_URL` | Base URL of the SearxNG instance. In Docker Compose this is set to `http://searxng:8080` for the backend. |
+| `SEARXNG_TIMEOUT_SECONDS` | Timeout in seconds for each SearxNG request (default: `10`). |
+| `SEARCH_PROVIDER_DEFAULT` | Default search provider when the client does not send one (e.g. `searxng`). |
+| `SEARCH_PROVIDER_FALLBACKS` | Optional. Comma-separated list of providers to try if the primary fails (e.g. `tavily,serpapi`). Off if unset. |
+
+### Using SearxNG in the app
+
+1. In the app setup, choose **SearxNG (Self-hosted)** as the search provider. No API key is required.
+2. Run a search as usual; results are fetched from your SearxNG instance.
+
+### Accessing the SearxNG web UI
+
+By default, SearxNG is not exposed on the host. To use its web UI (e.g. for debugging or direct search), temporarily add a port mapping in your compose file:
+
+```yaml
+searxng:
+  image: searxng/searxng:latest
+  ports:
+    - "8080:8080"
+  # ... rest unchanged
+```
+
+Then open `http://localhost:8080`. Remove the `ports` block when you no longer need host access.
 
 ---
 

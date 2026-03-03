@@ -26,6 +26,20 @@ services:
       - ${HOME:-/tmp}:${HOME:-/tmp}:rw
     restart: unless-stopped
 
+  searxng:
+    image: searxng/searxng:latest
+    expose:
+      - "8080"
+    volumes:
+      - searxng_data:/etc/searxng
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sSf -o /dev/null 'http://127.0.0.1:8080/search?q=test&format=json' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
   backend:
     build:
       context: .
@@ -40,6 +54,8 @@ services:
       - SEMANTIC_CACHE_DB=/app/data/semantic_cache.db
       - AGENT_BROWSER_WORKDIR=/tmp/agent_browser
       - EXECUTOR_URL=http://executor:7777
+      - SEARXNG_URL=http://searxng:8080
+      - SEARXNG_TIMEOUT_SECONDS=10
     depends_on:
       redis:
         condition: service_healthy
@@ -74,3 +90,4 @@ services:
 volumes:
   redis_data:
   backend_data:
+  searxng_data:

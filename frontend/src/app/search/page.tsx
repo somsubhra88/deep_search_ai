@@ -188,7 +188,7 @@ type SearchMode =
   | "social_media"
   | "rag";
 type ModelId = "openai" | "anthropic" | "grok" | "mistral" | "gemini" | "deepseek" | "qwen" | "ollama" | "inception";
-type SearchProvider = "serpapi" | "tavily";
+type SearchProvider = "serpapi" | "tavily" | "searxng";
 
 // ---------------------------------------------------------------------------
 // Constants & Helpers
@@ -351,6 +351,11 @@ const SEARCH_PROVIDER_META: Record<
     label: "Tavily",
     keyLabel: "TAVILY_API_KEY",
     helper: "AI search API focused on web extraction",
+  },
+  searxng: {
+    label: "SearxNG (Self-hosted)",
+    keyLabel: "—",
+    helper: "Self-hosted metasearch; no API key required when running via Docker",
   },
 };
 
@@ -826,6 +831,7 @@ export default function SearchPage() {
     search_provider: "serpapi",
     search_api_key: "",
   });
+  const [ollamaModels, setOllamaModels] = useState<string[]>(MODEL_CATALOG.ollama);
   const [currentSearchId, setCurrentSearchId] = useState<string | null>(null);
   const [bridgeSuggestions, setBridgeSuggestions] = useState<BridgeSuggestion[]>([]);
   const [bridgeLoading, setBridgeLoading] = useState(false);
@@ -940,6 +946,17 @@ export default function SearchPage() {
       });
   }, []);
 
+  useEffect(() => {
+    if (setup.llm_provider !== "ollama" && modelId !== "ollama") return;
+    fetch("/api/ollama/models", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : { models: [] }))
+      .then((data: { models?: string[] }) => {
+        const list = Array.isArray(data?.models) && data.models.length > 0 ? data.models : MODEL_CATALOG.ollama;
+        setOllamaModels(list);
+      })
+      .catch(() => setOllamaModels(MODEL_CATALOG.ollama));
+  }, [setup.llm_provider, modelId]);
+
   const addToHistory = useCallback((q: string) => {
     const trimmed = q.trim();
     if (!trimmed) return;
@@ -1019,17 +1036,32 @@ export default function SearchPage() {
     [currentSearchId, router]
   );
 
-  const updateSetupProvider = useCallback((provider: ModelId) => {
-    const defaultModel = MODEL_CATALOG[provider][0] || "";
-    setSetup((prev) => ({
-      ...prev,
-      llm_provider: provider,
-      llm_model: defaultModel,
-      llm_api_key: provider === prev.llm_provider ? prev.llm_api_key : "",
-    }));
-    setModelId(provider);
-    setModelName(defaultModel);
-  }, []);
+  const modelsForProvider = useCallback(
+    (provider: ModelId, current?: string): string[] => {
+      const list = provider === "ollama" ? ollamaModels : MODEL_CATALOG[provider];
+      if (provider === "ollama" && current && current.trim() && !list.includes(current)) {
+        return [current, ...list];
+      }
+      return list;
+    },
+    [ollamaModels]
+  );
+
+  const updateSetupProvider = useCallback(
+    (provider: ModelId) => {
+      const list = provider === "ollama" ? ollamaModels : MODEL_CATALOG[provider];
+      const defaultModel = list[0] || "";
+      setSetup((prev) => ({
+        ...prev,
+        llm_provider: provider,
+        llm_model: defaultModel,
+        llm_api_key: provider === prev.llm_provider ? prev.llm_api_key : "",
+      }));
+      setModelId(provider);
+      setModelName(defaultModel);
+    },
+    [ollamaModels]
+  );
 
   const submitSetup = useCallback(async () => {
     const providerConfigured = configuredProviders[setup.llm_provider];
@@ -1148,6 +1180,7 @@ export default function SearchPage() {
             model_id: modelId,
             model_name: modelName,
             mode_settings: modeSettings,
+            search_provider: searchProvider,
           }),
           signal: controller.signal,
         }
@@ -1416,13 +1449,15 @@ export default function SearchPage() {
                 </label>
 
                 <label className="block">
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">Model (exhaustive preset list)</span>
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    {setup.llm_provider === "ollama" ? "Model (from Ollama — updates automatically)" : "Model"}
+                  </span>
                   <select
                     value={setup.llm_model}
                     onChange={(e) => setSetup((prev) => ({ ...prev, llm_model: e.target.value }))}
                     className="w-full rounded-xl border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm text-slate-200"
                   >
-                    {MODEL_CATALOG[setup.llm_provider].map((m) => (
+                    {modelsForProvider(setup.llm_provider, setup.llm_model).map((m) => (
                       <option key={m} value={m}>
                         {m}
                       </option>
@@ -1506,18 +1541,20 @@ export default function SearchPage() {
                   </p>
                 </label>
 
-                <label className="block">
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
-                    {SEARCH_PROVIDER_META[setup.search_provider].keyLabel}
-                  </span>
-                  <input
-                    type="password"
-                    value={setup.search_api_key}
-                    onChange={(e) => setSetup((prev) => ({ ...prev, search_api_key: e.target.value }))}
-                    placeholder="Paste search API key"
-                    className="w-full rounded-xl border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm text-slate-200"
-                  />
-                </label>
+                {setup.search_provider !== "searxng" && (
+                  <label className="block">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      {SEARCH_PROVIDER_META[setup.search_provider].keyLabel}
+                    </span>
+                    <input
+                      type="password"
+                      value={setup.search_api_key}
+                      onChange={(e) => setSetup((prev) => ({ ...prev, search_api_key: e.target.value }))}
+                      placeholder="Paste search API key"
+                      className="w-full rounded-xl border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm text-slate-200"
+                    />
+                  </label>
+                )}
 
                 <div className="flex justify-between pt-2">
                   <button
@@ -1763,7 +1800,7 @@ export default function SearchPage() {
                   }}
                   className="w-full rounded-xl border border-slate-600/60 bg-slate-900/50 px-3 py-2 text-sm text-slate-200 outline-none focus:border-emerald-500"
                 >
-                  {MODEL_CATALOG[modelId].map((m) => (
+                  {modelsForProvider(modelId, modelName).map((m) => (
                     <option key={m} value={m}>
                       {m}
                     </option>
