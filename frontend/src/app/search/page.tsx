@@ -1073,7 +1073,8 @@ export default function SearchPage() {
       toast.error("Please enter your model API key");
       return;
     }
-    if (!setup.search_api_key.trim()) {
+    const needsSearchKey = setup.search_provider === "serpapi" || setup.search_provider === "tavily";
+    if (needsSearchKey && !setup.search_api_key.trim()) {
       toast.error("Please enter your search API key");
       return;
     }
@@ -1137,7 +1138,9 @@ export default function SearchPage() {
         : setup.llm_provider === "inception"
           ? providerConfigured || !!setup.llm_api_key.trim()
           : !!setup.llm_api_key.trim();
-    const hasSetup = hasLLMKey && !!setup.search_api_key.trim();
+    const needsSearchKey = setup.search_provider === "serpapi" || setup.search_provider === "tavily";
+    const hasSetup =
+      hasLLMKey && (!needsSearchKey || !!setup.search_api_key.trim());
     if (!hasSetup) {
       setShowSetupModal(true);
       toast.info("Complete setup first to run research");

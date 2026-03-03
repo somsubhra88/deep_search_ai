@@ -110,15 +110,26 @@ class OpenAIEmbedder(Embedder):
 
 
 def get_embedder() -> Embedder:
-    """Return the best available embedder."""
+    """Return the best available embedder.
+
+    Uses OpenAI when OPENAI_API_KEY is set and valid; otherwise uses the
+    hash-based fallback (no API key needed, works offline). If the key
+    is set but invalid (e.g. 401), falls back to HashEmbedder so indexing
+    does not fail.
+    """
     api_key = os.getenv("OPENAI_API_KEY", "")
     if api_key:
         try:
             embedder = OpenAIEmbedder(api_key)
+            # Validate key with a minimal request; invalid/expired key causes 401
+            embedder.embed(["test"])
             logger.info("Using OpenAI embedder (text-embedding-3-small)")
             return embedder
         except Exception as e:
-            logger.warning("OpenAI embedder init failed, falling back to hash: %s", e)
+            logger.warning(
+                "OpenAI embedder unavailable (invalid key or network), falling back to hash: %s",
+                e,
+            )
 
-    logger.info("Using hash-based fallback embedder")
+    logger.info("Using hash-based fallback embedder (no API key required)")
     return HashEmbedder()

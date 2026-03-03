@@ -252,9 +252,9 @@ All settings live in `.env`; see `.env.example` for the full list.
 
 | Variable | Required | Default | Description |
 |:---------|:--------:|:--------|:------------|
-| `OPENAI_API_KEY` | ✅ | — | OpenAI API key |
+| `OPENAI_API_KEY` | ✅* | — | OpenAI API key (*required only if using OpenAI as LLM; for RAG embeddings a hash fallback is used when missing or invalid) |
 | `OPENAI_MODEL` | | `gpt-4o-mini` | Model name |
-| `SERPAPI_API_KEY` | ✅* | — | SerpAPI key (*or Tavily) |
+| `SERPAPI_API_KEY` | ✅* | — | SerpAPI key (*only when `SEARCH_PROVIDER=serpapi`) |
 | `SEARCH_PROVIDER` | | `serpapi` | `serpapi`, `tavily`, or `searxng` |
 | `TAVILY_API_KEY` | | — | If using Tavily |
 | `SEARXNG_URL` | | — | Base URL of SearxNG instance (e.g. `http://searxng:8080` in Docker) |
