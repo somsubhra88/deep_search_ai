@@ -32,6 +32,7 @@ services:
       - "8080"
     volumes:
       - searxng_data:/etc/searxng
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -sSf -o /dev/null 'http://127.0.0.1:8080/search?q=test&format=json' || exit 1"]
       interval: 30s

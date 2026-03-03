@@ -317,6 +317,8 @@ docker compose up
 
 This starts `searxng`, `backend`, and `frontend`. The SearxNG container listens on port 8080 **inside** the Docker network only; no host port is published, so the search engine is not reachable from your machine except via the app.
 
+The project includes `searxng/settings.yml`, which enables the **JSON** output format (required for the backend; without it, SearxNG returns 403 Forbidden for `format=json`). If you replace this file or use your own volume, ensure `search.formats` includes `json`. After changing settings, restart the container: `docker compose restart searxng`.
+
 ### Environment variables
 
 | Variable | Description |

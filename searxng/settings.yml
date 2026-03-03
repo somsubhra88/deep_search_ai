@@ -1,0 +1,15 @@
+# SearxNG settings for use with Deep Search AI (Docker).
+# Enables JSON format so the backend can consume search results via API.
+# See https://docs.searxng.org/admin/settings/settings.html
+
+use_default_settings: true
+
+server:
+  secret_key: "change-me-in-production"
+  limiter: false
+
+# Enable JSON output (required for backend search; otherwise /search?format=json returns 403)
+search:
+  formats:
+    - html
+    - json
