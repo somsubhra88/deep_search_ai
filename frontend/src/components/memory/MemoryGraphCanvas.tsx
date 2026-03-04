@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect } from "react";
 import Link from "next/link";
 import {
   ReactFlow,
@@ -13,55 +13,73 @@ import {
   type NodeMouseHandler,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { Brain } from "lucide-react";
 
 import SearchNode from "./SearchNode";
 import NodeDetailsSidebar from "./NodeDetailsSidebar";
-import {
-  mockNodes,
-  mockEdges,
-  type MemoryEdgeData,
-} from "./mockMemoryData";
-
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
+import { buildGraph, type WidgetSession } from "./buildMemoryGraph";
+import { loadFromStorage, SESSIONS_KEY } from "@/lib/storage";
 
 const nodeTypes = { searchNode: SearchNode } as const;
 
-function edgeStyle(similarity: number) {
-  if (similarity >= 0.8)
-    return { stroke: "#4ade80", strokeWidth: 2, opacity: 0.7 };
-  if (similarity >= 0.6)
-    return { stroke: "#4ade8066", strokeWidth: 1.5, opacity: 0.45 };
-  return { stroke: "#475569", strokeWidth: 1, opacity: 0.25 };
-}
-
-// ---------------------------------------------------------------------------
-// Component
-// ---------------------------------------------------------------------------
-
 export default function MemoryGraphCanvas() {
-  const [nodes, , onNodesChange] = useNodesState(mockNodes);
-  const [edges, , onEdgesChange] = useEdgesState(mockEdges);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [sessions, setSessions] = useState<WidgetSession[]>([]);
 
-  const styledEdges = useMemo(
-    () =>
-      edges.map((e) => {
-        const score = (e.data as MemoryEdgeData | undefined)?.similarityScore ?? 0.5;
-        return {
-          ...e,
-          type: "smoothstep" as const,
-          style: edgeStyle(score),
-          animated: score >= 0.8,
-        };
-      }),
-    [edges],
-  );
+  useEffect(() => {
+    const stored = loadFromStorage<WidgetSession[]>(SESSIONS_KEY, []);
+    setSessions(stored);
+    const { nodes: n, edges: e } = buildGraph(stored);
+    setNodes(n);
+    setEdges(e);
+  }, [setNodes, setEdges]);
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
     setSelectedNode(node);
   }, []);
+
+  if (sessions.length === 0) {
+    return (
+      <div className="relative flex min-h-screen w-full flex-col items-center justify-center bg-gray-950 px-4">
+        <div className="pointer-events-none absolute left-0 top-0 z-10 w-full px-5 py-4">
+          <div className="pointer-events-auto inline-flex items-center gap-3 rounded-2xl border border-slate-700/60 bg-gray-900/80 px-5 py-3 shadow-xl backdrop-blur-md">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 shadow-lg shadow-green-500/20">
+              <span className="text-sm font-bold text-white">M</span>
+            </div>
+            <div>
+              <h1 className="text-sm font-bold text-slate-100">
+                Semantic Memory Graph
+              </h1>
+              <p className="text-[11px] text-slate-500">
+                0 research nodes
+              </p>
+            </div>
+          </div>
+        </div>
+        <Link
+          href="/"
+          className="pointer-events-auto absolute right-5 top-4 inline-flex items-center gap-1.5 rounded-xl border border-slate-700/60 bg-gray-900/80 px-4 py-2.5 text-xs font-medium text-slate-400 shadow-xl backdrop-blur-md transition hover:border-green-500/40 hover:text-green-400"
+        >
+          ← Back to Search
+        </Link>
+        <div className="rounded-2xl border border-slate-700/40 bg-slate-800/20 p-8 text-center">
+          <Brain className="mx-auto mb-3 h-10 w-10 text-slate-600" />
+          <p className="text-sm text-slate-500">No research sessions yet.</p>
+          <p className="mt-1 text-xs text-slate-600">
+            Complete your first search to start building your memory graph.
+          </p>
+          <Link
+            href="/"
+            className="mt-4 inline-block text-xs text-green-500 hover:text-green-400"
+          >
+            Go to Search →
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative h-screen w-full bg-gray-950">
@@ -95,7 +113,7 @@ export default function MemoryGraphCanvas() {
       {/* ── React Flow Canvas ── */}
       <ReactFlow
         nodes={nodes}
-        edges={styledEdges}
+        edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         nodeTypes={nodeTypes}

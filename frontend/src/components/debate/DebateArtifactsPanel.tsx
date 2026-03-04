@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { FileText, Scale, GitBranch, AlertTriangle, Download, Copy, Check } from "lucide-react";
 import { DebateArtifacts, DebateMessage } from "./types";
+import DebateArgumentGraph from "./DebateArgumentGraph";
 
 type Props = {
   artifacts: DebateArtifacts;
@@ -157,52 +158,9 @@ export default function DebateArtifactsPanel({ artifacts, messages, sessionId, i
         </div>
       )}
 
-      {/* Argument Graph (simple list view) */}
+      {/* Argument Graph — interactive node/edge graph with hover for full claim */}
       {tab === "graph" && artifacts.argumentGraph && (
-        <div className="space-y-3">
-          <h4 className="text-xs font-semibold uppercase text-slate-400">
-            {artifacts.argumentGraph.claims.length} Claims · {artifacts.argumentGraph.relations.length} Relations
-          </h4>
-          <div className="space-y-2 max-h-[50vh] overflow-y-auto">
-            {artifacts.argumentGraph.claims.map((c) => (
-              <div key={c.claimId} className={`rounded-lg border p-2.5 ${
-                c.byAgent === "A"
-                  ? isDark ? "border-emerald-500/20 bg-emerald-500/5" : "border-emerald-200 bg-emerald-50"
-                  : isDark ? "border-rose-500/20 bg-rose-500/5" : "border-rose-200 bg-rose-50"
-              }`}>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="text-xs text-slate-300 flex-1">{c.text}</div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <span className={`rounded px-1 py-0.5 text-[9px] font-bold ${
-                      c.type === "evidence" ? "bg-cyan-500/20 text-cyan-400" :
-                      c.type === "counterclaim" ? "bg-rose-500/20 text-rose-400" :
-                      c.type === "assumption" ? "bg-amber-500/20 text-amber-400" :
-                      "bg-slate-500/20 text-slate-400"
-                    }`}>
-                      {c.type}
-                    </span>
-                    <MsgIds ids={c.messageIds} onClick={onScrollToMessage} />
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-          {artifacts.argumentGraph.relations.length > 0 && (
-            <div className="mt-3">
-              <h4 className="mb-1 text-[10px] font-semibold uppercase text-slate-500">Relations</h4>
-              <div className="space-y-1">
-                {artifacts.argumentGraph.relations.map((r, i) => (
-                  <div key={i} className="text-[11px] text-slate-400">
-                    {r.from} <span className={`font-bold ${
-                      r.rel === "supports" ? "text-emerald-400" :
-                      r.rel === "refutes" ? "text-rose-400" : "text-sky-400"
-                    }`}>{r.rel}</span> {r.to}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
+        <DebateArgumentGraph argumentGraph={artifacts.argumentGraph} isDark={isDark} />
       )}
 
       {/* Coverage Gaps */}

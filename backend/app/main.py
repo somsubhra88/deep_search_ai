@@ -915,11 +915,11 @@ class AgentProfileIn(BaseModel):
     randomized: bool = False
 
 class DebateConfig(BaseModel):
-    turn_count: int = Field(default=10, ge=2, le=30)
+    turn_count: int = Field(default=5, ge=2, le=30)
     cross_exam_enabled: bool = True
-    cross_exam_questions_per_agent: int = Field(default=2, ge=1, le=5)
-    max_tokens_per_message: int = Field(default=500, ge=100, le=2000)
-    max_sentences_per_message: int = Field(default=15, ge=3, le=50)
+    cross_exam_questions_per_agent: int = Field(default=1, ge=1, le=5)
+    max_tokens_per_message: int = Field(default=300, ge=100, le=2000)
+    max_sentences_per_message: int = Field(default=6, ge=2, le=50)
     no_repetition: bool = True
     retrieval_enabled: bool = False
     evidence_urls: list[str] = Field(default_factory=list, max_length=20)

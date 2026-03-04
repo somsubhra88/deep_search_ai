@@ -44,11 +44,11 @@ function randomPersona(): PersonaConfig {
 }
 
 const DEFAULT_CONFIG: DebateConfig = {
-  turn_count: 10,
+  turn_count: 5,
   cross_exam_enabled: true,
-  cross_exam_questions_per_agent: 2,
-  max_tokens_per_message: 500,
-  max_sentences_per_message: 15,
+  cross_exam_questions_per_agent: 1,
+  max_tokens_per_message: 300,
+  max_sentences_per_message: 6,
   no_repetition: true,
   retrieval_enabled: false,
   evidence_urls: [],

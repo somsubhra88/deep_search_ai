@@ -207,7 +207,7 @@ MAX_QUERY_LENGTH = 500
 MAX_SCRAPE_CONTENT = 6000
 MAX_SOURCES_PER_SEARCH = 5
 MAX_TOTAL_SOURCES = 10
-SCRAPE_CONCURRENCY = 4
+SCRAPE_CONCURRENCY = 8
 
 MODE_CONFIGS = {
     "standard": {"queries": 4, "sources": 10, "description": "balanced research"},
@@ -1282,44 +1282,83 @@ Return ONLY valid JSON in this exact format (no markdown):
 # Web Scraping (with SSRF protection + parallel execution)
 # ---------------------------------------------------------------------------
 
+def _use_docling_for_url(url: str) -> bool:
+    """Use Docling for PDFs and document-style URLs (faster, better extraction)."""
+    lower = url.lower().split("?")[0]
+    return lower.endswith(".pdf") or ".pdf#" in lower
+
+
 async def _scrape_url(url: str, retries: int = 2) -> str:
     if not _is_safe_url(url):
         logger.warning("Blocked unsafe URL: %s", url[:100])
         return "[URL blocked by security policy]"
 
-    async def _fetch_html_with_safe_redirects(initial_url: str) -> str:
+    # Use Docling for PDFs (faster and better extraction for documents)
+    if _use_docling_for_url(url):
+        try:
+            from docling.document_converter import DocumentConverter
+            converter = DocumentConverter()
+            result = await asyncio.to_thread(converter.convert, url)
+            text = (result.document.export_to_markdown() or "").strip()
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            return text[:MAX_SCRAPE_CONTENT] if len(text) > MAX_SCRAPE_CONTENT else text
+        except Exception as e:
+            logger.debug("Docling fallback failed for %s: %s", url[:80], e)
+
+    async def _fetch_with_safe_redirects(initial_url: str) -> tuple[bytes, str]:
         current_url = initial_url
         max_redirects = 3
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; DeepSearchAgent/1.0; +https://github.com/search-agent)",
         }
-
         async with httpx.AsyncClient(
-            timeout=10.0, follow_redirects=False, verify=_ssl_verify
+            timeout=8.0, follow_redirects=False, verify=_ssl_verify
         ) as client:
             for _ in range(max_redirects + 1):
                 if not _is_safe_url(current_url):
                     raise RuntimeError("Redirected to a blocked URL")
-
                 resp = await client.get(current_url, headers=headers)
-
                 if resp.status_code in {301, 302, 303, 307, 308}:
                     location = resp.headers.get("location")
                     if not location:
                         raise RuntimeError("Redirect location missing")
                     current_url = urljoin(current_url, location)
                     continue
-
                 resp.raise_for_status()
-                return resp.text
-
+                content_type = (resp.headers.get("content-type") or "").lower()
+                return resp.content, content_type
         raise RuntimeError("Too many redirects while scraping")
+
+    # Prefer lxml parser (faster) when available
+    try:
+        import lxml  # noqa: F401
+        parser = "lxml"
+    except ImportError:
+        parser = "html.parser"
 
     last_err = None
     for attempt in range(retries):
         try:
-            html = await _fetch_html_with_safe_redirects(url)
-            soup = BeautifulSoup(html, "html.parser")
+            raw, content_type = await _fetch_with_safe_redirects(url)
+            if "application/pdf" in content_type:
+                try:
+                    from docling.document_converter import DocumentConverter
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                        tmp.write(raw)
+                        tmp_path = tmp.name
+                    try:
+                        converter = DocumentConverter()
+                        result = await asyncio.to_thread(converter.convert, tmp_path)
+                        text = (result.document.export_to_markdown() or "").strip()
+                    finally:
+                        os.unlink(tmp_path)
+                    text = re.sub(r"\n{3,}", "\n\n", text)
+                    return text[:MAX_SCRAPE_CONTENT] if len(text) > MAX_SCRAPE_CONTENT else text
+                except Exception:
+                    pass
+            html = raw.decode("utf-8", errors="replace")
+            soup = BeautifulSoup(html, parser)
             for tag in soup(["script", "style", "nav", "header", "footer"]):
                 tag.decompose()
             text = soup.get_text(separator="\n", strip=True)
@@ -1328,7 +1367,7 @@ async def _scrape_url(url: str, retries: int = 2) -> str:
         except Exception as e:
             last_err = e
             if attempt < retries - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
     logger.warning("Failed to scrape URL after retries (%s): %s", url[:120], last_err)
     return "[Content unavailable]"
 
@@ -1526,14 +1565,21 @@ async def run_research_agent(
             queries = queries[:mode_cfg["queries"]]
         yield await _emit_step("queries_ready", f"Generated {len(queries)} queries", {"queries": queries})
 
-        # Step 2: Execute searches (with caching)
+        # Step 2: Execute searches in parallel (faster)
         step_ctx = "search"
+        yield await _emit_step("searching", f"Searching {len(queries)} queries in parallel...")
+        search_tasks = [
+            asyncio.to_thread(_search, q, num=MAX_SOURCES_PER_SEARCH, safe_search=safe_search, provider=search_provider)
+            for q in queries
+        ]
+        results_per_query = await asyncio.gather(*search_tasks, return_exceptions=True)
         all_results: list[dict] = []
-        for i, q in enumerate(queries):
-            yield await _emit_step("searching", f"Searching for: {q[:50]}...")
-            results = await asyncio.to_thread(_search, q, num=MAX_SOURCES_PER_SEARCH, safe_search=safe_search, provider=search_provider)
-            all_results.extend(results)
-            yield await _emit_step("search_done", f"Found {len(results)} results for query {i+1}")
+        for i, r in enumerate(results_per_query):
+            if isinstance(r, Exception):
+                logger.warning("Search query %d failed: %s", i + 1, r)
+                continue
+            all_results.extend(r)
+        yield await _emit_step("search_done", f"Found {len(all_results)} results")
 
         # Deduplicate by URL
         seen: set[str] = set()

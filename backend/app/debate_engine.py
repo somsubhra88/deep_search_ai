@@ -332,68 +332,37 @@ class DebateOrchestrator:
                 "Use direct quotes from evidence to strengthen arguments.\n"
             )
 
-        return f"""You are Agent {agent_id}, debating the topic: "{self.topic}"
-Your stance: {stance}
-Your persona: {persona.get('profession', 'Analyst')}, attitude: {persona.get('attitude', 'logical')}, style: {persona.get('style', 'formal')}
-Gender: {persona.get('gender', 'neutral')}
+        return f"""You are Agent {agent_id} in a live debate. Topic: "{self.topic}"
+Stance: {stance}. Persona: {persona.get('profession', 'Analyst')} — {persona.get('attitude', 'logical')}, {persona.get('style', 'formal')}.
 
 {persp}
 {evidence_ctx}
 
-Debate history (recent):
+Recent exchange:
 {history}
 
 {opponent_ctx}
 
-Rules:
-- Directly address your opponent's latest point. Be specific.
-- Stay in character as your persona.
-- Maximum {max_sentences} sentences.
-- {"Do NOT repeat arguments already made." if no_repeat else ""}
-{evidence_rule}- If your attitude is 'data-backed', cite evidence and call out uncertainty.
-- Be persuasive but professional.
-
-Respond as Agent {agent_id} ({stance}):"""
+Rules: Be concise and human. 2–4 short sentences. Address the last point directly. No repetition. Stay in character. {evidence_rule}Maximum {max_sentences} sentences. Reply as Agent {agent_id}:"""
 
     def _cross_exam_question_prompt(self, questioner: str, opponent_msg: dict | None) -> str:
         persona = self.agents[questioner]["persona"]
         excerpt = (opponent_msg["text"][:300] if opponent_msg else "No prior message")
         mid = opponent_msg["message_id"] if opponent_msg else "N/A"
 
-        return f"""You are Agent {questioner} cross-examining your opponent.
-Your persona: {persona.get('profession', 'Analyst')}, attitude: {persona.get('attitude', 'logical')}
-Topic: "{self.topic}"
+        return f"""Agent {questioner} cross-examining. Topic: "{self.topic}"
+Opponent said [{mid}]: "{excerpt}"
 
-The opponent's statement you are challenging [{mid}]:
-"{excerpt}"
-
-Rules:
-- Quote or reference a specific part of the above statement.
-- Ask exactly ONE pointed, direct question.
-- Do NOT ask multi-part questions.
-- Be incisive but professional.
-
-Your cross-examination question:"""
+Ask ONE short, pointed question (1–2 sentences). Be direct and professional:"""
 
     def _cross_exam_answer_prompt(self, answerer: str, question_text: str, q_mid: str) -> str:
         persona = self.agents[answerer]["persona"]
         stance = self.agents[answerer]["stance"]
 
-        return f"""You are Agent {answerer} answering a cross-examination question.
-Your stance: {stance}
-Your persona: {persona.get('profession', 'Analyst')}, attitude: {persona.get('attitude', 'logical')}
-Topic: "{self.topic}"
+        return f"""Agent {answerer} answering. Stance: {stance}. Topic: "{self.topic}"
+Question [{q_mid}]: "{question_text}"
 
-Question [{q_mid}]:
-"{question_text}"
-
-Rules:
-- Answer the question directly and honestly.
-- Acknowledge any assumptions you made.
-- Explicitly address the specific point raised.
-- Stay in character. Be professional.
-
-Your answer:"""
+Answer in 2–3 short sentences. Direct and honest. Stay in character:"""
 
     # ------------------------------------------------------------------
     # Artifact generators

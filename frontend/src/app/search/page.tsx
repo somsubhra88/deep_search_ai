@@ -1253,6 +1253,9 @@ export default function SearchPage() {
                   setSessions((prev) => {
                     const next = [session, ...prev].slice(0, MAX_SESSIONS);
                     compressAndStore(SESSIONS_KEY, next);
+                    toast.success(
+                      `Report ready! Memory graph: ${next.length} node${next.length !== 1 ? "s" : ""}`,
+                    );
                     return next;
                   });
                   setCurrentSearchId(session.id);
@@ -1272,7 +1275,6 @@ export default function SearchPage() {
                       summary_snippet: (meta?.essence_text || reportText.slice(0, 500)) ?? "",
                     }),
                   }).catch(() => {});
-                  toast.success("Report ready!");
                 }
               } catch {
                 // ignore parse errors on SSE chunks

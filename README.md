@@ -77,7 +77,7 @@ Multi-agent architecture · Self-reflection · Claim verification · RAG over yo
 
 <div align="center">
 
-<img src="https://placehold.co/800x400/0f172a/334155?text=▶+Video+Demo+Coming+Soon&font=inter" alt="Video demo placeholder" width="85%" />
+<iframe width="85%" height="400" src="https://www.youtube.com/embed/Wxd2TUR1C2g" title="Deep Search AI Agent Demo" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
 
 *Live research flow · RAG setup · Debate mode · Assistant with real tool execution*
 

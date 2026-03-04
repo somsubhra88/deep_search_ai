@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeSanitize from "rehype-sanitize";
 import { DebateMessage, PersonaConfig } from "./types";
 
 type Props = {
@@ -54,7 +57,7 @@ export default function DebateChatTimeline({ messages, personaA, personaB, isDar
             <div
               key={msg.messageId}
               ref={(el) => { messageRefs.current[msg.messageId] = el; }}
-              className={`rounded-xl border p-3 transition-all ${accentBg} ${alignment}`}
+              className={`rounded-xl border p-4 transition-all ${accentBg} ${alignment}`}
             >
               {/* Reply thread preview */}
               {msg.replyToMessageId && (
@@ -93,11 +96,19 @@ export default function DebateChatTimeline({ messages, personaA, personaB, isDar
                 <span className="text-[9px] tabular-nums text-slate-500">{msg.messageId}</span>
               </div>
 
-              {/* Message text */}
-              <div className="text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">
-                {msg.text}
+              {/* Message text — markdown when final, plain when streaming for readable output */}
+              <div className={`debate-message-body text-sm leading-relaxed max-w-full overflow-hidden ${isDark ? "text-slate-200" : "text-slate-700"}`}>
+                {msg.isStreaming ? (
+                  <span className="whitespace-pre-wrap">{msg.text}</span>
+                ) : (
+                  <div className={`prose prose-sm max-w-none prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-headings:my-2 prose-p:leading-snug ${isDark ? "prose-invert" : ""}`}>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+                      {msg.text || ""}
+                    </ReactMarkdown>
+                  </div>
+                )}
                 {msg.isStreaming && (
-                  <span className="ml-1 inline-block h-4 w-1.5 animate-pulse rounded-sm bg-violet-400" />
+                  <span className="ml-1 inline-block h-4 w-1.5 animate-pulse rounded-sm bg-violet-400 align-middle" />
                 )}
               </div>
             </div>
