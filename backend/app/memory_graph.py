@@ -19,11 +19,16 @@ import pathlib
 import threading
 from datetime import datetime, timezone
 
-import openai
-
 logger = logging.getLogger(__name__)
 
-_ssl_verify = os.getenv("SSL_VERIFY", "true").lower() not in ("0", "false", "no")
+# ---------------------------------------------------------------------------
+# Configuration — tuneable via env vars, sensible defaults
+# ---------------------------------------------------------------------------
+
+RECALL_THRESHOLD = float(os.getenv("MEMORY_RECALL_THRESHOLD", "0.55"))
+RECALL_MAX_RESULTS = int(os.getenv("MEMORY_RECALL_MAX_RESULTS", "8"))
+GRAPH_EDGE_THRESHOLD = float(os.getenv("MEMORY_GRAPH_EDGE_THRESHOLD", "0.3"))
+MAX_QUERY_STORE_LEN = int(os.getenv("MEMORY_MAX_QUERY_LEN", "500"))
 
 # ---------------------------------------------------------------------------
 # Lightweight File-Backed Vector Store
@@ -104,37 +109,25 @@ except Exception as _init_err:
 
 
 # ---------------------------------------------------------------------------
-# OpenAI Embedding Client (lazy singleton)
+# Embedding — uses OpenAI when available, hash-based fallback otherwise
 # ---------------------------------------------------------------------------
 
-_openai_client: openai.OpenAI | None = None
+_embedder = None
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-
-
-def _get_openai_client() -> openai.OpenAI:
-    global _openai_client
-    if _openai_client is None:
-        api_key = os.getenv("OPENAI_API_KEY", "")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is required for semantic memory embeddings")
-        kwargs: dict = {"api_key": api_key}
-        if not _ssl_verify:
-            import httpx as _httpx
-            kwargs["http_client"] = _httpx.Client(verify=False)
-        _openai_client = openai.OpenAI(**kwargs)
-    return _openai_client
+def _get_embedder():
+    global _embedder
+    if _embedder is None:
+        from app.rag.embeddings import get_embedder
+        _embedder = get_embedder()
+        logger.info("Memory graph using embedder: %s (dim=%d)", type(_embedder).__name__, _embedder.dim)
+    return _embedder
 
 
 async def _get_embedding(text: str) -> list[float]:
-    """Generate an embedding vector using OpenAI text-embedding-3-small."""
-    client = _get_openai_client()
-    response = await asyncio.to_thread(
-        client.embeddings.create,
-        model=EMBEDDING_MODEL,
-        input=text,
-    )
-    return response.data[0].embedding
+    """Generate an embedding vector using the best available embedder."""
+    embedder = _get_embedder()
+    vec = await asyncio.to_thread(embedder.embed_one, text)
+    return vec.tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +192,7 @@ async def store_search_memory(
             embedding=embedding,
             document=essence_text,
             metadata={
-                "original_query": original_query[:500],
+                "original_query": original_query[:MAX_QUERY_STORE_LEN],
                 "timestamp": timestamp,
                 "essence_text": essence_text,
             },
@@ -217,8 +210,8 @@ async def store_search_memory(
 
 async def recall_past_context(
     new_query: str,
-    threshold: float = 0.75,
-    max_results: int = 5,
+    threshold: float | None = None,
+    max_results: int | None = None,
 ) -> list[dict]:
     """
     Find past research memories semantically related to *new_query*.
@@ -229,6 +222,11 @@ async def recall_past_context(
 
     Only memories whose cosine similarity >= *threshold* are included.
     """
+    if threshold is None:
+        threshold = RECALL_THRESHOLD
+    if max_results is None:
+        max_results = RECALL_MAX_RESULTS
+
     if _store is None or _store.count() == 0:
         return []
 
@@ -259,3 +257,62 @@ async def recall_past_context(
         })
 
     return memories
+
+
+# ---------------------------------------------------------------------------
+# Memory Graph — pairwise cosine similarity from stored embeddings
+# ---------------------------------------------------------------------------
+
+def get_memory_graph(threshold: float | None = None) -> dict:
+    """
+    Compute pairwise cosine similarity between all stored memory embeddings.
+
+    Returns::
+
+        {
+            "nodes": [{"id": str, "query": str, "essence": str, "timestamp": str}, ...],
+            "edges": [{"source": str, "target": str, "similarity": float}, ...],
+        }
+
+    Only edges with similarity >= *threshold* are included.
+    Runs entirely from the in-memory vector store — no API calls needed.
+    """
+    if threshold is None:
+        threshold = GRAPH_EDGE_THRESHOLD
+
+    if _store is None or _store.count() == 0:
+        return {"nodes": [], "edges": []}
+
+    with _store._lock:
+        entries = list(_store._entries)
+
+    nodes = []
+    for entry in entries:
+        meta = entry.get("metadata", {})
+        nodes.append({
+            "id": entry["id"],
+            "query": meta.get("original_query", ""),
+            "essence": meta.get("essence_text", entry.get("document", "")),
+            "timestamp": meta.get("timestamp", ""),
+        })
+
+    edges = []
+    n = len(entries)
+    for i in range(n):
+        emb_i = entries[i].get("embedding")
+        if not emb_i:
+            continue
+        for j in range(i + 1, n):
+            emb_j = entries[j].get("embedding")
+            if not emb_j:
+                continue
+            sim = _cosine_similarity(emb_i, emb_j)
+            if sim >= threshold:
+                edges.append({
+                    "source": entries[i]["id"],
+                    "target": entries[j]["id"],
+                    "similarity": round(sim, 4),
+                })
+
+    edges.sort(key=lambda e: e["similarity"], reverse=True)
+    return {"nodes": nodes, "edges": edges}

@@ -15,7 +15,14 @@ import "@xyflow/react/dist/style.css";
 import { X, ArrowRight, Brain } from "lucide-react";
 import SearchNode from "./SearchNode";
 import NodeDetailsSidebar from "./NodeDetailsSidebar";
-import { buildGraph, type WidgetSession, type RecalledMemory } from "./buildMemoryGraph";
+import {
+  buildGraph,
+  fetchEmbeddingGraph,
+  type WidgetSession,
+  type RecalledMemory,
+  type MemoryGraphResponse,
+} from "./buildMemoryGraph";
+import { loadManualLinks, type ManualLink } from "@/lib/storage";
 
 const nodeTypes = { searchNode: SearchNode } as const;
 
@@ -39,6 +46,17 @@ export default function MemoryGraphWidget({
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [embeddingGraph, setEmbeddingGraph] = useState<MemoryGraphResponse | null>(null);
+  const [manualLinks, setManualLinks] = useState<ManualLink[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchEmbeddingGraph().then((eg) => {
+      if (!cancelled) setEmbeddingGraph(eg);
+    });
+    setManualLinks(loadManualLinks());
+    return () => { cancelled = true; };
+  }, [sessions.length]);
 
   useEffect(() => {
     const g = buildGraph(
@@ -46,16 +64,17 @@ export default function MemoryGraphWidget({
       currentQuery,
       currentEssence,
       recalledMemories,
+      embeddingGraph,
+      manualLinks,
     );
     setNodes(g.nodes);
     setEdges(g.edges);
-  }, [sessions, currentQuery, currentEssence, recalledMemories, setNodes, setEdges]);
+  }, [sessions, currentQuery, currentEssence, recalledMemories, embeddingGraph, manualLinks, setNodes, setEdges]);
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
     setSelectedNode(node);
   }, []);
 
-  // ── Empty state ──
   if (sessions.length === 0 && !currentQuery) {
     return (
       <div
@@ -89,7 +108,7 @@ export default function MemoryGraphWidget({
             : "border-slate-200 bg-white/60"
         }`}
       >
-        {/* ── Header ── */}
+        {/* Header */}
         <div
           className={`flex items-center justify-between px-5 py-3 border-b ${
             isDark ? "border-slate-700/40" : "border-slate-200"
@@ -113,7 +132,8 @@ export default function MemoryGraphWidget({
                   : "bg-slate-200 text-slate-500"
               }`}
             >
-              {nodes.length} node{nodes.length !== 1 ? "s" : ""}
+              {nodes.length} node{nodes.length !== 1 ? "s" : ""} &middot;{" "}
+              {edges.length} link{edges.length !== 1 ? "s" : ""}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -136,7 +156,7 @@ export default function MemoryGraphWidget({
           </div>
         </div>
 
-        {/* ── ReactFlow Canvas ── */}
+        {/* ReactFlow Canvas */}
         <div className="h-[400px] w-full">
           <ReactFlow
             nodes={nodes}
@@ -165,7 +185,6 @@ export default function MemoryGraphWidget({
         </div>
       </div>
 
-      {/* Sidebar rendered outside overflow-hidden container so fixed positioning works */}
       <NodeDetailsSidebar
         node={selectedNode}
         onClose={() => setSelectedNode(null)}

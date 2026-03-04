@@ -42,7 +42,7 @@ _ENV_PATH = _resolve_env_path()
 load_dotenv(dotenv_path=_ENV_PATH)
 
 from app.agent import run_research_agent, clear_llm_cache, clear_search_cache, _get_llm, MODEL_REGISTRY
-from app.memory_graph import recall_past_context
+from app.memory_graph import recall_past_context, get_memory_graph, GRAPH_EDGE_THRESHOLD
 from app.db import init_db, new_session_id, create_session, get_session, update_session_status
 from app.debate_engine import DebateOrchestrator
 from app.schemas.evidence import EvidenceCardList, EvidenceConfig
@@ -210,6 +210,7 @@ class ResearchRequest(BaseModel):
     model_name: str | None = None
     mode_settings: dict | None = None
     search_provider: str | None = None
+    linked_context: list[dict] | None = None
 
     @field_validator("query")
     @classmethod
@@ -643,6 +644,21 @@ async def research(request: Request, body: ResearchRequest):
     except Exception as e:
         logger.warning("Memory recall failed (non-fatal): %s", e)
 
+    # Merge manually linked context from the client's graph
+    if body.linked_context:
+        existing_queries = {m.get("query", "").strip().lower() for m in recalled_memories}
+        for lc in body.linked_context:
+            q_norm = lc.get("query", "").strip().lower()
+            if q_norm and q_norm not in existing_queries:
+                recalled_memories.append({
+                    "query": lc.get("query", ""),
+                    "essence": lc.get("essence", ""),
+                    "timestamp": lc.get("timestamp", ""),
+                    "similarity": 1.0,
+                })
+                existing_queries.add(q_norm)
+        logger.info("After merging linked context: %d total memories", len(recalled_memories))
+
     async def event_generator():
         try:
             async for event in run_research_agent(
@@ -666,6 +682,16 @@ async def research(request: Request, body: ResearchRequest):
             yield {"event": "error", "data": json.dumps({"error": err_msg})}
 
     return EventSourceResponse(event_generator())
+
+
+# ---------------------------------------------------------------------------
+# Memory Graph API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/memory/graph")
+async def memory_graph_endpoint(threshold: float = GRAPH_EDGE_THRESHOLD):
+    """Return all stored memories with pairwise cosine similarity edges computed from embeddings."""
+    return get_memory_graph(threshold=threshold)
 
 
 # ---------------------------------------------------------------------------

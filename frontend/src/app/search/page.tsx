@@ -58,6 +58,7 @@ import {
   saveActiveReport,
   loadActiveReport,
   clearActiveReport,
+  loadManualLinks,
 } from "@/lib/storage";
 import type { ActiveReport } from "@/lib/storage";
 import { useRouter } from "next/navigation";
@@ -899,6 +900,29 @@ export default function SearchPage() {
     }
   }, []);
 
+  // Keep sessions (and badge) in sync when tab becomes visible or storage changes
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        setSessions(loadFromStorage(SESSIONS_KEY, []));
+      }
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === SESSIONS_KEY) {
+        try {
+          const next = e.newValue ? (JSON.parse(e.newValue) as Session[]) : [];
+          setSessions(next);
+        } catch { /* ignore */ }
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
   useEffect(() => {
     const unregister = registerHandlers({
       toggle: (key) => {
@@ -1184,6 +1208,27 @@ export default function SearchPage() {
             model_name: modelName,
             mode_settings: modeSettings,
             search_provider: searchProvider,
+            linked_context: (() => {
+              try {
+                const links = loadManualLinks();
+                if (links.length === 0) return undefined;
+                const currentSessions = loadFromStorage<Session[]>(SESSIONS_KEY, []);
+                const sessionById = new Map(currentSessions.map((s) => [s.id, s]));
+                const linkedSessionIds = new Set<string>();
+                for (const link of links) {
+                  linkedSessionIds.add(link.sourceId);
+                  linkedSessionIds.add(link.targetId);
+                }
+                return Array.from(linkedSessionIds)
+                  .map((id) => sessionById.get(id))
+                  .filter(Boolean)
+                  .map((s) => ({
+                    query: s!.query,
+                    essence: (s!.metadata?.essence_text as string) || "",
+                    timestamp: new Date(s!.timestamp).toISOString(),
+                  }));
+              } catch { return undefined; }
+            })(),
           }),
           signal: controller.signal,
         }

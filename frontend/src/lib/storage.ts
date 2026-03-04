@@ -2,7 +2,7 @@ export const HISTORY_KEY = "deep-search-history";
 export const MAX_HISTORY = 20;
 export const THEME_KEY = "deep-search-theme";
 export const SESSIONS_KEY = "deep-search-sessions";
-export const MAX_SESSIONS = 10;
+export const MAX_SESSIONS = 50;
 export const SETUP_KEY = "deep-search-setup";
 export const RESEARCH_HISTORY_KEY = "deep-search-research-history";
 export const MAX_RESEARCH_HISTORY = 50;
@@ -11,6 +11,41 @@ export const EXPLAIN_MODE_KEY = "deep-search-explain-mode";
 export const ACTIVE_REPORT_KEY = "deep-search-active-report";
 export const ACTIVE_CHAT_KEY = "deep-search-active-chat";
 export const MAX_PERSISTED_MESSAGES = 100;
+
+export const MANUAL_LINKS_KEY = "deep-search-manual-links";
+
+export type ManualLink = {
+  sourceId: string;
+  targetId: string;
+  sourceQuery: string;
+  targetQuery: string;
+  createdAt: number;
+};
+
+export function loadManualLinks(): ManualLink[] {
+  return loadFromStorage<ManualLink[]>(MANUAL_LINKS_KEY, []);
+}
+
+export function saveManualLink(link: ManualLink) {
+  const existing = loadManualLinks();
+  const key = [link.sourceId, link.targetId].sort().join("||");
+  const deduped = existing.filter((l) => {
+    const k = [l.sourceId, l.targetId].sort().join("||");
+    return k !== key;
+  });
+  deduped.push(link);
+  compressAndStore(MANUAL_LINKS_KEY, deduped);
+}
+
+export function removeManualLink(sourceId: string, targetId: string) {
+  const existing = loadManualLinks();
+  const key = [sourceId, targetId].sort().join("||");
+  const filtered = existing.filter((l) => {
+    const k = [l.sourceId, l.targetId].sort().join("||");
+    return k !== key;
+  });
+  compressAndStore(MANUAL_LINKS_KEY, filtered);
+}
 
 export type ActiveReport = {
   query: string;

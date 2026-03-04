@@ -522,16 +522,30 @@ async def _generate_search_queries(
     query: str, is_social: bool = False, budget: TokenBudget = None,
     mode: str = "standard", active_llm: ChatOpenAI = None,
     mode_settings: dict | None = None,
+    recalled_memories: list[dict] | None = None,
 ) -> list[str]:
     active_llm = active_llm or llm
     mode_cfg = MODE_CONFIGS.get(mode, MODE_CONFIGS["standard"])
     max_queries = mode_cfg["queries"]
 
+    # Build RAG context from recalled memories so queries build on prior research
+    memory_context = ""
+    if recalled_memories:
+        past_items = []
+        for m in recalled_memories[:5]:
+            past_items.append(f"- \"{m.get('query', '')}\" → {m.get('essence', '')} (similarity: {m.get('similarity', 0):.0%})")
+        memory_context = (
+            "\n\nThe user has previously researched related topics. Use this context to generate "
+            "queries that BUILD UPON and EXTEND prior knowledge rather than repeating it:\n"
+            + "\n".join(past_items)
+            + "\n\nFocus on NEW angles, deeper aspects, recent developments, or gaps not covered by prior research.\n"
+        )
+
     if is_social:
         prompt = f"""You are a research assistant. The user is searching for a username, hashtag, or social media tag.
 
 Input: {query}
-
+{memory_context}
 Generate exactly 3-5 search queries to find information about this person/tag/hashtag across the web.
 - PRESERVE the exact @username or #hashtag in at least one query
 - Add variations: site:twitter.com, site:instagram.com, site:linkedin.com, site:reddit.com
@@ -543,7 +557,7 @@ Generate exactly 3-5 search queries to find information about this person/tag/ha
         prompt = f"""You are a research assistant. Given the user's topic below, generate exactly {max_queries} specific, focused search queries that will help find comprehensive information.
 
 Topic: {query}
-
+{memory_context}
 Rules:
 {mode_instructions}
 - Output ONLY a JSON array of strings, no other text. Example: ["query 1", "query 2", "query 3"]
@@ -1552,12 +1566,14 @@ async def run_research_agent(
         queries = await _generate_search_queries(
             query, is_social=is_social, budget=budget, mode=primary_mode,
             active_llm=active_llm, mode_settings=mode_settings,
+            recalled_memories=recalled_memories,
         )
         # If multiple modes, add extra mode-specific queries
         for extra_mode in active_modes[1:]:
             extra = await _generate_search_queries(
                 query, is_social=is_social, budget=budget, mode=extra_mode,
                 active_llm=active_llm, mode_settings=mode_settings,
+                recalled_memories=recalled_memories,
             )
             for q in extra:
                 if q not in queries:
@@ -1735,11 +1751,22 @@ async def run_research_agent(
 
             memory_context = ""
             if recalled_memories:
-                essences = [m["essence"] for m in recalled_memories[:3]]
+                mem_items = []
+                for m in recalled_memories[:5]:
+                    sim_pct = f"{m.get('similarity', 0):.0%}"
+                    mem_items.append(
+                        f"  - Query: \"{m.get('query', '')}\" | Essence: {m.get('essence', '')} | Relevance: {sim_pct}"
+                    )
                 memory_context = (
-                    "\n\nNote: The user previously researched related topics. "
-                    f"Past context: {'; '.join(essences)}. "
-                    "Use this context to build upon prior knowledge and avoid redundancy.\n"
+                    "\n\n## Prior Research Context (from user's research history)\n"
+                    "The user has previously researched these related topics:\n"
+                    + "\n".join(mem_items)
+                    + "\n\nIMPORTANT: Use this prior context to:\n"
+                    "1. Build upon and extend prior findings rather than repeating them\n"
+                    "2. Reference connections to previous research where relevant\n"
+                    "3. Focus on NEW insights, recent developments, or deeper analysis\n"
+                    "4. Highlight how this topic relates to or differs from prior research\n"
+                    "5. Personalize the report by acknowledging the user's research journey\n"
                 )
 
             synthesis_prompt = f"""You are a research analyst. Synthesize the following sources into a comprehensive, well-structured Markdown report.
