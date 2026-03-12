@@ -306,12 +306,14 @@ const MODEL_CATALOG: Record<ModelId, string[]> = {
   openai: [
     "gpt-4o",
     "gpt-4o-mini",
-    "gpt-4.1",
-    "gpt-4.1-mini",
-    "gpt-4.1-nano",
-    "o4-mini",
-    "o3",
+    "chatgpt-4o-latest",
+    "o1",
+    "o1-preview",
+    "o1-mini",
     "o3-mini",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-3.5-turbo",
   ],
   anthropic: [
     "claude-sonnet-4-20250514",
@@ -319,6 +321,7 @@ const MODEL_CATALOG: Record<ModelId, string[]> = {
     "claude-3-5-sonnet-20241022",
     "claude-3-5-haiku-20241022",
     "claude-3-opus-20240229",
+    "claude-3-haiku-20240307",
   ],
   grok: [
     "grok-3",
@@ -334,12 +337,21 @@ const MODEL_CATALOG: Record<ModelId, string[]> = {
     "codestral-latest",
     "pixtral-large-latest",
     "mistral-saba-latest",
+    "ministral-8b-latest",
+    "ministral-3b-latest",
   ],
   gemini: [
     "gemini-2.5-pro",
     "gemini-2.5-flash",
+    "gemini-2.0-flash-exp",
+    "gemini-2.0-flash-thinking-exp",
     "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
+    "gemini-exp-1206",
+    "gemini-1.5-pro",
+    "gemini-1.5-pro-002",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-002",
+    "gemini-1.5-flash-8b",
   ],
   deepseek: [
     "deepseek-chat",
@@ -359,7 +371,7 @@ const MODEL_CATALOG: Record<ModelId, string[]> = {
   ],
   inception: ["mercury-2"],
   openrouter: [
-    // Fallback models - actual list fetched dynamically from OpenRouter API
+    // Fallback - actual list fetched dynamically
     "anthropic/claude-3.5-sonnet",
     "openai/gpt-4o",
   ],
@@ -870,6 +882,7 @@ export default function SearchPage() {
   const [ollamaModels, setOllamaModels] = useState<string[]>(MODEL_CATALOG.ollama);
   const [openrouterModels, setOpenrouterModels] = useState<string[]>([]);
   const [dynamicModels, setDynamicModels] = useState<Partial<Record<ModelId, string[]>>>({});
+  const [registryCatalog, setRegistryCatalog] = useState<Partial<Record<ModelId, string[]>>>({});
   const [fetchingModels, setFetchingModels] = useState<Partial<Record<ModelId, boolean>>>({});
   const [modelSearchTerm, setModelSearchTerm] = useState("");
   const [currentSearchId, setCurrentSearchId] = useState<string | null>(null);
@@ -1020,44 +1033,101 @@ export default function SearchPage() {
       .catch(() => setOllamaModels(MODEL_CATALOG.ollama));
   }, [setup.llm_provider, modelId]);
 
-  const fetchDynamicModels = useCallback(async (provider: ModelId) => {
-    if (fetchingModels[provider]) return;
-
-    setFetchingModels((prev) => ({ ...prev, [provider]: true }));
+  const fetchDynamicModels = useCallback(async (provider: ModelId, silent = false) => {
+    setFetchingModels((prev) => {
+      if (prev[provider]) {
+        console.log(`Already fetching models for ${provider}, skipping`);
+        return prev;
+      }
+      return { ...prev, [provider]: true };
+    });
 
     try {
+      console.log(`Fetching models for ${provider}...`);
       const res = await fetch(`/api/models/${provider}`, { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      if (!res.ok) {
+        console.error(`HTTP error fetching ${provider} models: ${res.status}`);
+        throw new Error(`HTTP ${res.status}`);
+      }
 
       const data = await res.json();
       const models = data.models || [];
+      console.log(`Received ${models.length} models for ${provider}`);
 
       // Extract model IDs from the response
       const modelIds = models.map((m: any) => typeof m === "string" ? m : m.id || m.name).filter(Boolean);
+      console.log(`Extracted ${modelIds.length} model IDs for ${provider}`);
 
-      setDynamicModels((prev) => ({ ...prev, [provider]: modelIds }));
+      if (modelIds.length > 0) {
+        setDynamicModels((prev) => {
+          console.log(`Updating dynamic models for ${provider} with ${modelIds.length} models`);
+          return { ...prev, [provider]: modelIds };
+        });
 
-      if (provider === "openrouter") {
-        setOpenrouterModels(modelIds);
-        toast.success(`Loaded ${modelIds.length} models from OpenRouter`);
+        if (provider === "openrouter") {
+          setOpenrouterModels(modelIds);
+        }
+
+        if (!silent) {
+          toast.success(`Loaded ${modelIds.length} models from ${MODEL_PROVIDER_META[provider]?.label || provider}`);
+        }
+      } else {
+        console.warn(`No models extracted for ${provider}, using fallback`);
+        if (!silent) {
+          toast.warning(`No models available for ${provider}, using defaults`);
+        }
       }
     } catch (error) {
       console.error(`Failed to fetch ${provider} models:`, error);
-      toast.error(`Failed to load models for ${provider}`);
+      if (!silent) {
+        toast.error(`Failed to load models for ${provider}`);
+      }
     } finally {
       setFetchingModels((prev) => ({ ...prev, [provider]: false }));
     }
-  }, [fetchingModels]);
+  }, []);
 
-  // Auto-fetch OpenRouter models when selected
+  // Load model registry from backend on mount
+  useEffect(() => {
+    console.log("Loading model registry from backend...");
+    fetch("/api/models/registry", { cache: "no-store" })
+      .then((res) => res.ok ? res.json() : { catalog: {} })
+      .then((data: { catalog: Record<string, string[]> }) => {
+        const catalog = data.catalog || {};
+        console.log("Loaded model registry:", Object.keys(catalog).length, "providers");
+        setRegistryCatalog(catalog);
+      })
+      .catch((error) => {
+        console.error("Failed to load model registry:", error);
+      });
+  }, []);
+
+  // Preload models for all providers on mount (run once)
+  useEffect(() => {
+    console.log("Preloading models for all providers...");
+    const providersToPreload: ModelId[] = ["openai", "openrouter", "mistral", "gemini", "deepseek", "qwen"];
+
+    // Delay to prevent all requests firing at exact same time
+    providersToPreload.forEach((provider, index) => {
+      setTimeout(() => {
+        fetchDynamicModels(provider, true);
+      }, index * 100); // Stagger by 100ms
+    });
+  }, []); // Empty dependency array - only run once on mount
+
+  // Auto-fetch OpenRouter models when selected (if not already loaded or loading)
   useEffect(() => {
     if (setup.llm_provider === "openrouter" || modelId === "openrouter") {
-      // Only fetch if we haven't already or if cache is empty
-      if (!dynamicModels["openrouter"] || (dynamicModels["openrouter"]?.length ?? 0) === 0) {
-        fetchDynamicModels("openrouter");
+      const hasModels = dynamicModels["openrouter"] && dynamicModels["openrouter"].length > 0;
+      const isLoading = fetchingModels["openrouter"];
+
+      if (!hasModels && !isLoading) {
+        console.log("OpenRouter selected but models not loaded, fetching...");
+        fetchDynamicModels("openrouter", false);
       }
     }
-  }, [setup.llm_provider, modelId, dynamicModels, fetchDynamicModels]);
+  }, [setup.llm_provider, modelId, dynamicModels, fetchingModels, fetchDynamicModels]);
 
   const addToHistory = useCallback((q: string) => {
     const trimmed = q.trim();
@@ -1140,13 +1210,16 @@ export default function SearchPage() {
 
   const modelsForProvider = useCallback(
     (provider: ModelId, current?: string): string[] => {
-      // Use dynamic models if available, otherwise fallback to static catalog
+      // Priority: dynamic models > registry > static catalog
       let list: string[] = [];
 
       if (dynamicModels[provider] && dynamicModels[provider]!.length > 0) {
         list = dynamicModels[provider]!;
       } else if (provider === "ollama") {
         list = ollamaModels;
+      } else if (registryCatalog[provider] && registryCatalog[provider]!.length > 0) {
+        // Use registry as fallback
+        list = registryCatalog[provider]!;
       } else {
         list = MODEL_CATALOG[provider] || [];
       }
@@ -1164,7 +1237,7 @@ export default function SearchPage() {
 
       return list;
     },
-    [ollamaModels, dynamicModels, modelSearchTerm]
+    [ollamaModels, dynamicModels, registryCatalog, modelSearchTerm]
   );
 
   const updateSetupProvider = useCallback(

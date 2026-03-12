@@ -54,6 +54,8 @@ else:
 
 logger = logging.getLogger(__name__)
 
+from app.model_registry import update_registry_from_api, get_model_catalog
+
 _ssl_verify = os.getenv("SSL_VERIFY", "true").lower() not in ("0", "false", "no")
 _debug_traceback = os.getenv("DEBUG_TRACEBACK", "false").lower() in ("1", "true", "yes")
 
@@ -152,6 +154,8 @@ MODEL_REGISTRY = {
 }
 
 _llm_cache: dict[str, BaseChatModel] = {}
+_models_cache: dict[str, tuple[float, list[dict]]] = {}  # {provider_id: (timestamp, models)}
+_MODELS_CACHE_TTL = 3600  # 1 hour
 
 
 def clear_llm_cache() -> None:
@@ -163,15 +167,78 @@ def clear_search_cache() -> None:
     _search_cache.clear()
 
 
-def list_available_models(provider_id: str, api_key: str | None = None) -> list[dict]:
+def clear_models_cache() -> None:
+    """Clear the models cache."""
+    _models_cache.clear()
+
+
+def update_all_model_registries() -> None:
+    """
+    Update model registries for all providers that support list_models.
+    Called on application startup to ensure registry files are up to date.
+    """
+    logger.info("=" * 60)
+    logger.info("Updating model registries from provider APIs...")
+    logger.info("=" * 60)
+    updated_count = 0
+    skipped_count = 0
+
+    for provider_id, cfg in MODEL_REGISTRY.items():
+        if not cfg.get("supports_list_models"):
+            logger.debug(f"⊘ {provider_id}: does not support listing models")
+            continue
+
+        api_key_env = cfg.get("api_key_env")
+        has_key = bool(os.getenv(api_key_env, "")) if api_key_env else True
+
+        if not has_key and provider_id != "openrouter":
+            logger.warning(f"⚠ {provider_id}: No API key found ({api_key_env} not set)")
+            skipped_count += 1
+            continue
+
+        try:
+            logger.info(f"→ Fetching models from {cfg.get('label')} ({provider_id})...")
+            # Fetch models from API (with short timeout for startup)
+            models = list_available_models(provider_id, force_refresh=True)
+
+            if models:
+                # Update the registry file
+                if update_registry_from_api(provider_id, models):
+                    updated_count += 1
+                    logger.info(f"✓ Updated {provider_id} registry: {len(models)} models")
+                else:
+                    logger.info(f"✓ {provider_id} registry already up to date: {len(models)} models")
+            else:
+                logger.warning(f"✗ {provider_id}: No models returned from API")
+
+        except Exception as e:
+            logger.warning(f"✗ {provider_id}: Failed to update registry: {e}")
+            skipped_count += 1
+
+    logger.info("=" * 60)
+    logger.info(f"Model registry update complete:")
+    logger.info(f"  - Updated: {updated_count} providers")
+    logger.info(f"  - Skipped: {skipped_count} providers")
+    logger.info("=" * 60)
+
+
+def list_available_models(provider_id: str, api_key: str | None = None, force_refresh: bool = False) -> list[dict]:
     """
     Fetch available models from a provider's API.
     Returns a list of model dicts with 'id', 'name', 'context_length', and optional metadata.
     Returns empty list if fetching fails.
+    Caches results for 1 hour to reduce API calls.
     """
     cfg = MODEL_REGISTRY.get(provider_id)
     if not cfg or not cfg.get("supports_list_models"):
         return []
+
+    # Check cache first (unless force refresh)
+    if not force_refresh and provider_id in _models_cache:
+        cached_time, cached_models = _models_cache[provider_id]
+        if time.time() - cached_time < _MODELS_CACHE_TTL:
+            logger.debug("Returning cached models for %s (%d models)", provider_id, len(cached_models))
+            return cached_models
 
     try:
         key = api_key or os.getenv(cfg.get("api_key_env", ""), "")
@@ -211,7 +278,7 @@ def list_available_models(provider_id: str, api_key: str | None = None) -> list[
         # Parse response based on provider
         if provider_id == "ollama":
             models = data.get("models", [])
-            return [
+            result = [
                 {
                     "id": m.get("name", ""),
                     "name": m.get("name", ""),
@@ -220,6 +287,8 @@ def list_available_models(provider_id: str, api_key: str | None = None) -> list[
                 }
                 for m in models if m.get("name")
             ]
+            _models_cache[provider_id] = (time.time(), result)
+            return result
         elif provider_id == "openrouter":
             models = data.get("data", [])
             result = []
@@ -237,11 +306,12 @@ def list_available_models(provider_id: str, api_key: str | None = None) -> list[
                     "top_provider": m.get("top_provider", {}),
                 })
             logger.info("Fetched %d models from OpenRouter", len(result))
+            _models_cache[provider_id] = (time.time(), result)
             return result
         else:
             # Standard OpenAI-compatible format
             models = data.get("data", [])
-            return [
+            result = [
                 {
                     "id": m.get("id", ""),
                     "name": m.get("id", ""),
@@ -250,6 +320,8 @@ def list_available_models(provider_id: str, api_key: str | None = None) -> list[
                 }
                 for m in models if m.get("id")
             ]
+            _models_cache[provider_id] = (time.time(), result)
+            return result
     except Exception as e:
         logger.warning("Failed to list models for %s: %s", provider_id, e)
         return []

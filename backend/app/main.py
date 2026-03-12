@@ -42,7 +42,7 @@ def _resolve_env_path() -> pathlib.Path:
 _ENV_PATH = _resolve_env_path()
 load_dotenv(dotenv_path=_ENV_PATH)
 
-from app.agent import run_research_agent, clear_llm_cache, clear_search_cache, _get_llm, MODEL_REGISTRY, list_available_models
+from app.agent import run_research_agent, clear_llm_cache, clear_search_cache, clear_models_cache, _get_llm, MODEL_REGISTRY, list_available_models, update_all_model_registries
 from app.memory_graph import recall_past_context, get_memory_graph, GRAPH_EDGE_THRESHOLD
 from app.db import init_db, new_session_id, create_session, get_session, update_session_status
 from app.debate_engine import DebateOrchestrator
@@ -534,16 +534,97 @@ async def list_ollama_models():
 
 
 @app.get("/api/models/{provider_id}")
-async def list_provider_models(provider_id: str, api_key: Optional[str] = None):
+async def list_provider_models(provider_id: str, api_key: Optional[str] = None, force_refresh: bool = False):
     """
     Dynamically fetch available models from a provider's API.
-    Query parameter 'api_key' is optional - uses env var if not provided.
+    Query parameters:
+    - api_key (optional): uses env var if not provided
+    - force_refresh (optional): bypass cache and fetch fresh data
     """
     if provider_id not in MODEL_REGISTRY:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
 
-    models = await asyncio.to_thread(list_available_models, provider_id, api_key)
+    models = await asyncio.to_thread(list_available_models, provider_id, api_key, force_refresh)
     return {"provider": provider_id, "models": models}
+
+
+@app.post("/api/models/cache/clear")
+async def clear_models_cache_endpoint():
+    """Clear the models cache. Useful to force refresh all provider models."""
+    clear_models_cache()
+    return {"status": "ok", "message": "Models cache cleared"}
+
+
+@app.get("/api/models/registry")
+async def get_model_registry():
+    """
+    Get the complete model catalog from registry files.
+    Returns a dict mapping provider IDs to their model lists.
+    """
+    from app.model_registry import get_model_catalog
+    catalog = await asyncio.to_thread(get_model_catalog)
+    return {"catalog": catalog}
+
+
+@app.post("/api/models/registry/update")
+async def force_update_model_registry():
+    """
+    Force update all model registries from provider APIs.
+    Useful for manually refreshing the model lists without restarting.
+    """
+    try:
+        await asyncio.to_thread(update_all_model_registries)
+        from app.model_registry import get_model_catalog
+        catalog = await asyncio.to_thread(get_model_catalog)
+        return {
+            "status": "ok",
+            "message": "Model registries updated successfully",
+            "catalog": catalog
+        }
+    except Exception as e:
+        logger.error(f"Failed to update model registries: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "message": str(e)}
+        )
+
+
+@app.get("/api/models/{provider_id}/debug")
+async def debug_provider_models(provider_id: str):
+    """
+    Debug endpoint to see raw API response from a provider.
+    Shows what models are being fetched and how they're being parsed.
+    """
+    if provider_id not in MODEL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+
+    cfg = MODEL_REGISTRY.get(provider_id)
+    if not cfg.get("supports_list_models"):
+        return {
+            "provider": provider_id,
+            "supports_list_models": False,
+            "message": "This provider does not support listing models"
+        }
+
+    try:
+        models = await asyncio.to_thread(list_available_models, provider_id, None, True)
+        from app.model_registry import load_models_from_file
+        registry_models = await asyncio.to_thread(load_models_from_file, provider_id)
+
+        return {
+            "provider": provider_id,
+            "api_models_count": len(models),
+            "api_models_sample": models[:10] if len(models) > 10 else models,
+            "registry_models_count": len(registry_models),
+            "registry_models": registry_models,
+            "models_match": set(m.get("id") if isinstance(m, dict) else m for m in models) == set(registry_models),
+        }
+    except Exception as e:
+        return {
+            "provider": provider_id,
+            "error": str(e),
+            "has_api_key": bool(os.getenv(cfg.get("api_key_env", ""), ""))
+        }
 
 
 @app.post("/api/providers/inception/test")
@@ -971,6 +1052,13 @@ async def _startup():
         logger.info("Knowledge Base DB initialized")
     except Exception as e:
         logger.warning("KB DB init failed (RAG features unavailable): %s", e)
+
+    # Update model registries from provider APIs
+    try:
+        await asyncio.to_thread(update_all_model_registries)
+        logger.info("Model registries updated")
+    except Exception as e:
+        logger.warning("Model registry update failed (using cached models): %s", e)
 
 
 # ---------------------------------------------------------------------------

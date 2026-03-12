@@ -1,0 +1,8 @@
+mistral-large-latest
+mistral-medium-latest
+mistral-small-latest
+codestral-latest
+pixtral-large-latest
+mistral-saba-latest
+ministral-8b-latest
+ministral-3b-latest
