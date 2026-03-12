@@ -1,7 +1,7 @@
 //! Pending approvals and "remember this" scoped rules.
 
 use crate::models::{ApprovalDecision, ToolRequest};
-use crate::policy::{risk_level, tool_name};
+use crate::policy::risk_level;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
@@ -64,7 +64,6 @@ impl ApprovalStore {
             let _ = pending.tx.send(result);
             Ok(Some(RespondedApproval {
                 tool: pending.tool,
-                run_id: pending.run_id,
                 approved: matches!(decision, ApprovalDecision::Approve),
             }))
         } else {
@@ -72,43 +71,10 @@ impl ApprovalStore {
         }
     }
 
-    pub fn get(&self, approval_id: &str) -> Option<PendingApprovalInfo> {
-        let guard = self.pending.lock().unwrap();
-        guard.get(approval_id).map(|p| PendingApprovalInfo {
-            id: p.id.clone(),
-            run_id: p.run_id.clone(),
-            tool_name: tool_name(&p.tool).to_string(),
-            tool: p.tool.clone(),
-            risk_level: p.risk_level,
-        })
-    }
-
-    pub fn list(&self) -> Vec<PendingApprovalInfo> {
-        let guard = self.pending.lock().unwrap();
-        guard
-            .values()
-            .map(|p| PendingApprovalInfo {
-                id: p.id.clone(),
-                run_id: p.run_id.clone(),
-                tool_name: tool_name(&p.tool).to_string(),
-                tool: p.tool.clone(),
-                risk_level: p.risk_level,
-            })
-            .collect()
-    }
 }
 
 pub struct RespondedApproval {
     pub tool: ToolRequest,
-    pub run_id: String,
     pub approved: bool,
 }
 
-#[derive(Clone)]
-pub struct PendingApprovalInfo {
-    pub id: String,
-    pub run_id: String,
-    pub tool_name: String,
-    pub tool: ToolRequest,
-    pub risk_level: u8,
-}

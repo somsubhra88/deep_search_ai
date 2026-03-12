@@ -15,7 +15,7 @@ fn redact_json(json: &serde_json::Value) -> serde_json::Value {
                 .iter()
                 .map(|(k, v)| {
                     let v = redact_json(v);
-                    let v = if let serde_json::Value::String(s) = &v {
+                    let v = if let serde_json::Value::String(_s) = &v {
                         let key_lower = k.to_lowercase();
                         if REDACT_PATTERNS.iter().any(|p| key_lower.contains(p)) {
                             serde_json::Value::String("[REDACTED]".to_string())

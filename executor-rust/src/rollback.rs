@@ -1,6 +1,5 @@
 //! Undo/rollback: store backups and restore via shell in background.
 
-use crate::config::{ensure_app_data_dir, undo_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;

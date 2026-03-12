@@ -20,8 +20,6 @@ pub enum RiskLevel {
 pub enum PolicyError {
     #[error("path outside workspace: {0}")]
     PathOutsideWorkspace(String),
-    #[error("path traversal or symlink escape: {0}")]
-    PathTraversal(String),
 }
 
 /// Expand ~ to HOME in path. Leaves path unchanged if no ~ or HOME unset.

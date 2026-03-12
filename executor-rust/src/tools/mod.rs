@@ -8,7 +8,6 @@ mod notes;
 mod clipboard;
 
 use crate::models::ToolRequest;
-use crate::policy::{path_under_workspace, resolve_in_workspace};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -103,8 +102,8 @@ pub fn execute_dry_run(tool: &ToolRequest) -> ToolResult {
         NetDownload { url, dst_path } => serde_json::json!({ "would": "download", "url": url, "dst": dst_path }),
         ArchiveExtract { archive_path, dst_dir } => serde_json::json!({ "would": "extract", "archive": archive_path, "dst": dst_dir }),
         ShellRun { cmd, cwd } => serde_json::json!({ "would": "run shell", "cmd": cmd, "cwd": cwd }),
-        NotesCreate { title, content, folder } => serde_json::json!({ "would": "create note", "title": title, "folder": folder }),
-        NotesUpdate { title, content, folder } => serde_json::json!({ "would": "update note", "title": title, "folder": folder }),
+        NotesCreate { title, content: _, folder } => serde_json::json!({ "would": "create note", "title": title, "folder": folder }),
+        NotesUpdate { title, content: _, folder } => serde_json::json!({ "would": "update note", "title": title, "folder": folder }),
         NotesSearch { query, folder } => serde_json::json!({ "would": "search notes", "query": query, "folder": folder }),
         ClipboardRead => serde_json::json!({ "would": "read clipboard" }),
         ClipboardWrite { content } => serde_json::json!({ "would": "write clipboard", "bytes": content.len() }),

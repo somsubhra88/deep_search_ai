@@ -28,7 +28,7 @@ start: ## Build and start all services (Docker)
 		echo "❌ No .env file found. Run 'make setup' first."; \
 		exit 1; \
 	fi
-	docker compose up --build -d
+	DOCKER_BUILDKIT=1 docker compose up --build -d
 	@echo ""
 	@echo "✅ Deep Search AI is running!"
 	@echo "   Frontend: http://localhost:$${FRONTEND_PORT:-3000}"
@@ -43,7 +43,7 @@ stop: ## Stop all services
 
 restart: ## Restart all services
 	docker compose down
-	docker compose up --build -d
+	DOCKER_BUILDKIT=1 docker compose up --build -d
 	@echo "✅ Restarted"
 
 logs: ## Follow live logs from all services
