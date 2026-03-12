@@ -160,28 +160,11 @@ class DebateOrchestrator:
 
             prompt = self._debate_prompt(agent_id, opponent_last)
 
-            yield _evt("message.started", {
-                "sessionId": self.session_id,
-                "messageId": message_id,
-                "agentId": agent_id,
-                "phase": "debate",
-                "replyToMessageId": reply_to,
-            })
-
-            full_text = ""
-            async for chunk in self._stream_llm(prompt):
-                full_text += chunk
-                yield _evt("message.delta", {"messageId": message_id, "delta": chunk})
-
-            record = self._save_message(
-                message_id=message_id, agent_id=agent_id, phase="debate",
-                text=full_text, reply_to=reply_to,
-            )
-            yield _evt("message.final", {
-                "messageId": message_id, "fullText": full_text,
-                "agentId": agent_id, "phase": "debate",
-                "replyToMessageId": reply_to, "createdAt": record["created_at"],
-            })
+            async for event in self._generate_and_save_message(
+                message_id=message_id, agent_id=agent_id,
+                phase="debate", prompt=prompt, reply_to=reply_to,
+            ):
+                yield event
 
     # ------------------------------------------------------------------
     # Phase 2: Cross-Examination
@@ -198,61 +181,28 @@ class DebateOrchestrator:
                 opponent_latest = self._latest_message_by(answerer)
                 challenges_id = opponent_latest["message_id"] if opponent_latest else None
 
-                # --- question ---
+                # Question
                 q_mid = f"{questioner}_XQ{round_num + 1}"
                 q_prompt = self._cross_exam_question_prompt(questioner, opponent_latest)
 
-                yield _evt("message.started", {
-                    "sessionId": self.session_id, "messageId": q_mid,
-                    "agentId": questioner, "phase": "cross_exam_question",
-                    "replyToMessageId": challenges_id,
-                    "challengesMessageId": challenges_id,
-                })
-
-                q_text = ""
-                async for chunk in self._stream_llm(q_prompt):
-                    q_text += chunk
-                    yield _evt("message.delta", {"messageId": q_mid, "delta": chunk})
-
-                q_rec = self._save_message(
+                async for event in self._generate_and_save_message(
                     message_id=q_mid, agent_id=questioner,
-                    phase="cross_exam_question", text=q_text,
+                    phase="cross_exam_question", prompt=q_prompt,
                     reply_to=challenges_id, challenges=challenges_id,
-                )
-                yield _evt("message.final", {
-                    "messageId": q_mid, "fullText": q_text,
-                    "agentId": questioner, "phase": "cross_exam_question",
-                    "replyToMessageId": challenges_id,
-                    "challengesMessageId": challenges_id,
-                    "createdAt": q_rec["created_at"],
-                })
+                ):
+                    yield event
 
-                # --- answer ---
+                # Answer (retrieve the question text from saved messages)
+                q_text = next((m["text"] for m in reversed(self.messages) if m["message_id"] == q_mid), "")
                 a_mid = f"{answerer}_XA{round_num + 1}"
                 a_prompt = self._cross_exam_answer_prompt(answerer, q_text, q_mid)
 
-                yield _evt("message.started", {
-                    "sessionId": self.session_id, "messageId": a_mid,
-                    "agentId": answerer, "phase": "cross_exam_answer",
-                    "replyToMessageId": q_mid, "answersQuestionId": q_mid,
-                })
-
-                a_text = ""
-                async for chunk in self._stream_llm(a_prompt):
-                    a_text += chunk
-                    yield _evt("message.delta", {"messageId": a_mid, "delta": chunk})
-
-                a_rec = self._save_message(
+                async for event in self._generate_and_save_message(
                     message_id=a_mid, agent_id=answerer,
-                    phase="cross_exam_answer", text=a_text,
+                    phase="cross_exam_answer", prompt=a_prompt,
                     reply_to=q_mid, answers_question=q_mid,
-                )
-                yield _evt("message.final", {
-                    "messageId": a_mid, "fullText": a_text,
-                    "agentId": answerer, "phase": "cross_exam_answer",
-                    "replyToMessageId": q_mid, "answersQuestionId": q_mid,
-                    "createdAt": a_rec["created_at"],
-                })
+                ):
+                    yield event
 
     # ------------------------------------------------------------------
     # Phase 3: Artifacts
@@ -293,15 +243,12 @@ class DebateOrchestrator:
         if not cards:
             return ""
 
-        lines = ["\nRetrieved Evidence (cite by card_id and quote when using):"]
-        for card in cards[:8]:
-            lines.append(
-                f"  [{card.card_id}] ({card.domain}) "
-                f"Claim: {card.claim[:120]} | "
-                f"Quote: \"{card.quote[:150]}\" | "
-                f"Confidence: {card.confidence:.1f}"
-            )
-        return "\n".join(lines)
+        formatted = [
+            f"  [{c.card_id}] ({c.domain}) Claim: {c.claim[:120]} | "
+            f"Quote: \"{c.quote[:150]}\" | Confidence: {c.confidence:.1f}"
+            for c in cards[:8]
+        ]
+        return "\nRetrieved Evidence (cite by card_id and quote when using):\n" + "\n".join(formatted)
 
     def _debate_prompt(self, agent_id: str, opponent_last: dict | None) -> str:
         agent = self.agents[agent_id]
@@ -368,6 +315,10 @@ Answer in 2–3 short sentences. Direct and honest. Stay in character:"""
     # Artifact generators
     # ------------------------------------------------------------------
 
+    async def _gen_artifact(self, artifact_type: str, prompt: str, fallback: dict) -> dict:
+        """Generic artifact generator with common pattern."""
+        return await self._invoke_json(prompt, fallback=fallback)
+
     async def _gen_summary(self) -> dict:
         transcript = self._format_transcript()
         prompt = f"""Analyze this debate transcript and produce a neutral summary.
@@ -384,7 +335,7 @@ Return ONLY valid JSON (no markdown fences):
   "unresolved_points": ["..."],
   "neutral_takeaway": "..."
 }}"""
-        return await self._invoke_json(prompt, fallback={
+        return await self._gen_artifact("summary", prompt, {
             "key_points_for": [], "key_points_against": [],
             "strongest_evidence": [], "unresolved_points": [],
             "neutral_takeaway": "Summary generation failed.",
@@ -415,7 +366,7 @@ Evaluate and return ONLY valid JSON (no markdown fences):
 }}
 
 CRITICAL: Cite specific message IDs in every rationale."""
-        return await self._invoke_json(prompt, fallback={
+        return await self._gen_artifact("judge", prompt, {
             "winner": "DRAW",
             "rubric": {"logic": 5, "evidence_quality": 5, "relevance": 5, "clarity": 5, "professional_tone": 5, "risk_compliance": 5},
             "rationales": [], "executive_recommendation": "Evaluation failed.",
@@ -439,10 +390,8 @@ Return ONLY valid JSON (no markdown fences):
     {{"from": "C3", "to": "C1", "rel": "supports" or "refutes" or "clarifies"}}
   ]
 }}"""
-        graph = await self._invoke_json(prompt, fallback={"claims": [], "relations": []})
-        if not graph.get("claims"):
-            graph = self._heuristic_graph()
-        return graph
+        graph = await self._gen_artifact("argument_graph", prompt, {"claims": [], "relations": []})
+        return graph if graph.get("claims") else self._heuristic_graph()
 
     def _compute_coverage_gaps(self, graph: dict) -> list[dict]:
         claims = {c["claimId"]: c for c in graph.get("claims", [])}
@@ -544,6 +493,42 @@ Return ONLY valid JSON (no markdown fences):
         self.messages.append(record)
         insert_message(record)
         return record
+
+    async def _generate_and_save_message(
+        self, *, message_id: str, agent_id: str, phase: str, prompt: str,
+        reply_to: str | None = None, challenges: str | None = None,
+        answers_question: str | None = None,
+    ) -> AsyncGenerator[dict, None]:
+        """Generate message from LLM, stream deltas, save, and yield events."""
+        yield _evt("message.started", {
+            "sessionId": self.session_id,
+            "messageId": message_id,
+            "agentId": agent_id,
+            "phase": phase,
+            "replyToMessageId": reply_to,
+            **({"challengesMessageId": challenges} if challenges else {}),
+            **({"answersQuestionId": answers_question} if answers_question else {}),
+        })
+
+        full_text = ""
+        async for chunk in self._stream_llm(prompt):
+            full_text += chunk
+            yield _evt("message.delta", {"messageId": message_id, "delta": chunk})
+
+        record = self._save_message(
+            message_id=message_id, agent_id=agent_id, phase=phase,
+            text=full_text, reply_to=reply_to, challenges=challenges,
+            answers_question=answers_question,
+        )
+
+        yield _evt("message.final", {
+            "messageId": message_id, "fullText": full_text,
+            "agentId": agent_id, "phase": phase,
+            "replyToMessageId": reply_to,
+            "createdAt": record["created_at"],
+            **({"challengesMessageId": challenges} if challenges else {}),
+            **({"answersQuestionId": answers_question} if answers_question else {}),
+        })
 
     def _heuristic_graph(self) -> dict:
         """Fallback: split debate messages into simple claims by sentence."""

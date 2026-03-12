@@ -53,14 +53,14 @@ Paths: use absolute paths or paths relative to user home. For "list my files" us
 def _parse_tool_response(text: str) -> dict | None:
     """Extract JSON tool call from LLM response."""
     text = text.strip()
-    # Try to find JSON block
-    for pattern in [
+    patterns = [
         r"\{[^{}]*\"tool\"[^{}]*\}",
         r"```json\s*(\{.*?\})\s*```",
         r"```\s*(\{.*?\})\s*```",
-    ]:
-        m = re.search(pattern, text, re.DOTALL)
-        if m:
+    ]
+
+    for pattern in patterns:
+        if m := re.search(pattern, text, re.DOTALL):
             try:
                 raw = m.group(1) if m.lastindex else m.group(0)
                 obj = json.loads(raw)
@@ -68,7 +68,7 @@ def _parse_tool_response(text: str) -> dict | None:
                     return obj
             except json.JSONDecodeError:
                 continue
-    # Try parsing whole response
+
     try:
         obj = json.loads(text)
         if isinstance(obj, dict) and "tool" in obj:
@@ -119,6 +119,20 @@ def _sanitize_message(message: str) -> str:
     import unicodedata
     cleaned = "".join(c for c in message if unicodedata.category(c)[0] != "C" or c in "\n\t")
     return cleaned[:2000]
+
+
+def _build_explain_payload(
+    model_id: str,
+    risk_level: str | None = None,
+    tool_calls: list[ToolCallSummary] | None = None,
+) -> dict:
+    """Build standard ExplainPayload."""
+    return ExplainPayload(
+        cache_decision=None,
+        retrieval=None,
+        generation=GenerationExplain(model=model_id, provider=model_id),
+        safety=SafetyExplain(risk_level=risk_level, tool_calls=tool_calls or []),
+    ).model_dump()
 
 
 def _build_persona_prompt_prefix(persona: dict | None) -> str:
@@ -196,17 +210,11 @@ async def act(
     Returns {run_id, result, tool, error?, approval_required?}.
     """
     if not is_executor_available():
-        explain = ExplainPayload(
-            cache_decision=None,
-            retrieval=None,
-            generation=GenerationExplain(model=model_id, provider=model_id),
-            safety=SafetyExplain(risk_level=None, tool_calls=[]),
-        ).model_dump()
         return {
             "run_id": run_id,
             "error": "Executor not available. Run: `cd executor-rust && cargo run` (local) or `make start` (Docker). The executor performs file, note, and clipboard actions.",
             "executor_available": False,
-            "explain": explain,
+            "explain": _build_explain_payload(model_id),
         }
 
     tool = await message_to_tool(
@@ -215,17 +223,11 @@ async def act(
         selected_context_ids=selected_context_ids,
     )
     if not tool:
-        explain = ExplainPayload(
-            cache_decision=None,
-            retrieval=None,
-            generation=GenerationExplain(model=model_id, provider=model_id),
-            safety=SafetyExplain(risk_level="safe", tool_calls=[]),
-        ).model_dump()
         return {
             "run_id": run_id,
             "result": None,
             "message": "No action to perform. Try: list my files, read a file, create a note, etc.",
-            "explain": explain,
+            "explain": _build_explain_payload(model_id, "safe"),
         }
 
     tool_name = (tool.get("tool") or "").strip()
@@ -239,28 +241,17 @@ async def act(
             dry_run=False,
             context=context,
         )
-        explain = ExplainPayload(
-            cache_decision=None,
-            retrieval=None,
-            generation=GenerationExplain(model=model_id, provider=model_id),
-            safety=SafetyExplain(risk_level=risk_level, tool_calls=[tool_summary]),
-        ).model_dump()
         return {
             "run_id": run_id,
             "result": result,
             "tool": tool,
             "executor_available": True,
-            "explain": explain,
+            "explain": _build_explain_payload(model_id, risk_level, [tool_summary]),
         }
     except Exception as e:
         err = str(e)
-        explain = ExplainPayload(
-            cache_decision=None,
-            retrieval=None,
-            generation=GenerationExplain(model=model_id, provider=model_id),
-            safety=SafetyExplain(risk_level=risk_level, tool_calls=[tool_summary]),
-        ).model_dump()
-        # Check if it's an approval timeout (user didn't approve in time)
+        explain = _build_explain_payload(model_id, risk_level, [tool_summary])
+
         if "timed out" in err.lower() or "approval" in err.lower():
             return {
                 "run_id": run_id,

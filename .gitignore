@@ -72,3 +72,4 @@ dist/
 
 # Rust (executor-rust)
 executor-rust/target/
+CLAUDE.md

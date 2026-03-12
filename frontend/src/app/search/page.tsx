@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, Suspense } from "react";
+import dynamic from "next/dynamic";
 import {
   Search,
   Loader2,
@@ -35,12 +36,35 @@ import {
   HelpCircle,
   ChevronRight,
   ExternalLink,
+  RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 import MemoryGraphWidget from "@/components/memory/MemoryGraphWidget";
-import DebateMode from "@/components/debate/DebateMode";
-import RAGMode from "@/components/RAGMode";
 import ModeCustomization, { DEFAULT_MODE_SETTINGS, type ModeSettings } from "@/components/ModeCustomization";
+import { HistoryList } from "@/components/search/HistoryList";
+import { SessionsList } from "@/components/search/SessionsList";
+import { ProgressLog } from "@/components/search/ProgressLog";
+
+// Lazy load heavy components for better initial load performance
+const DebateMode = dynamic(() => import("@/components/debate/DebateMode"), {
+  loading: () => (
+    <div className="mb-12 flex items-center justify-center rounded-2xl border border-slate-700/60 bg-slate-800/30 p-12">
+      <Loader2 className="h-8 w-8 animate-spin text-emerald-500" />
+      <span className="ml-3 text-slate-400">Loading Debate Mode...</span>
+    </div>
+  ),
+  ssr: false,
+});
+
+const RAGMode = dynamic(() => import("@/components/RAGMode"), {
+  loading: () => (
+    <div className="mb-12 flex items-center justify-center rounded-2xl border border-slate-700/60 bg-slate-800/30 p-12">
+      <Loader2 className="h-8 w-8 animate-spin text-emerald-500" />
+      <span className="ml-3 text-slate-400">Loading RAG Mode...</span>
+    </div>
+  ),
+  ssr: false,
+});
 import { useTheme } from "@/context/ThemeContext";
 import { useCommandPalette } from "@/context/CommandPaletteContext";
 import {
@@ -188,7 +212,7 @@ type SearchMode =
   | "deep_dive"
   | "social_media"
   | "rag";
-type ModelId = "openai" | "anthropic" | "grok" | "mistral" | "gemini" | "deepseek" | "qwen" | "ollama" | "inception";
+type ModelId = "openai" | "anthropic" | "grok" | "mistral" | "gemini" | "deepseek" | "qwen" | "ollama" | "inception" | "openrouter";
 type SearchProvider = "serpapi" | "tavily" | "searxng";
 
 // ---------------------------------------------------------------------------
@@ -264,6 +288,12 @@ const MODEL_PROVIDER_META: Record<
     color: "from-emerald-500 to-cyan-500",
     keyLabel: "INCEPTION_API_KEY",
   },
+  openrouter: {
+    label: "OpenRouter",
+    description: "Access 200+ models via unified API",
+    color: "from-purple-500 to-pink-500",
+    keyLabel: "OPENROUTER_API_KEY",
+  },
   ollama: {
     label: "Ollama (Local)",
     description: "Run open-source models locally",
@@ -328,6 +358,11 @@ const MODEL_CATALOG: Record<ModelId, string[]> = {
     "qwen2.5-7b-instruct",
   ],
   inception: ["mercury-2"],
+  openrouter: [
+    // Fallback models - actual list fetched dynamically from OpenRouter API
+    "anthropic/claude-3.5-sonnet",
+    "openai/gpt-4o",
+  ],
   ollama: [
     "llama3.2",
     "llama3.1:8b",
@@ -833,6 +868,10 @@ export default function SearchPage() {
     search_api_key: "",
   });
   const [ollamaModels, setOllamaModels] = useState<string[]>(MODEL_CATALOG.ollama);
+  const [openrouterModels, setOpenrouterModels] = useState<string[]>([]);
+  const [dynamicModels, setDynamicModels] = useState<Partial<Record<ModelId, string[]>>>({});
+  const [fetchingModels, setFetchingModels] = useState<Partial<Record<ModelId, boolean>>>({});
+  const [modelSearchTerm, setModelSearchTerm] = useState("");
   const [currentSearchId, setCurrentSearchId] = useState<string | null>(null);
   const [bridgeSuggestions, setBridgeSuggestions] = useState<BridgeSuggestion[]>([]);
   const [bridgeLoading, setBridgeLoading] = useState(false);
@@ -981,6 +1020,45 @@ export default function SearchPage() {
       .catch(() => setOllamaModels(MODEL_CATALOG.ollama));
   }, [setup.llm_provider, modelId]);
 
+  const fetchDynamicModels = useCallback(async (provider: ModelId) => {
+    if (fetchingModels[provider]) return;
+
+    setFetchingModels((prev) => ({ ...prev, [provider]: true }));
+
+    try {
+      const res = await fetch(`/api/models/${provider}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const data = await res.json();
+      const models = data.models || [];
+
+      // Extract model IDs from the response
+      const modelIds = models.map((m: any) => typeof m === "string" ? m : m.id || m.name).filter(Boolean);
+
+      setDynamicModels((prev) => ({ ...prev, [provider]: modelIds }));
+
+      if (provider === "openrouter") {
+        setOpenrouterModels(modelIds);
+        toast.success(`Loaded ${modelIds.length} models from OpenRouter`);
+      }
+    } catch (error) {
+      console.error(`Failed to fetch ${provider} models:`, error);
+      toast.error(`Failed to load models for ${provider}`);
+    } finally {
+      setFetchingModels((prev) => ({ ...prev, [provider]: false }));
+    }
+  }, [fetchingModels]);
+
+  // Auto-fetch OpenRouter models when selected
+  useEffect(() => {
+    if (setup.llm_provider === "openrouter" || modelId === "openrouter") {
+      // Only fetch if we haven't already or if cache is empty
+      if (!dynamicModels["openrouter"] || (dynamicModels["openrouter"]?.length ?? 0) === 0) {
+        fetchDynamicModels("openrouter");
+      }
+    }
+  }, [setup.llm_provider, modelId, dynamicModels, fetchDynamicModels]);
+
   const addToHistory = useCallback((q: string) => {
     const trimmed = q.trim();
     if (!trimmed) return;
@@ -1062,18 +1140,46 @@ export default function SearchPage() {
 
   const modelsForProvider = useCallback(
     (provider: ModelId, current?: string): string[] => {
-      const list = provider === "ollama" ? ollamaModels : MODEL_CATALOG[provider];
-      if (provider === "ollama" && current && current.trim() && !list.includes(current)) {
+      // Use dynamic models if available, otherwise fallback to static catalog
+      let list: string[] = [];
+
+      if (dynamicModels[provider] && dynamicModels[provider]!.length > 0) {
+        list = dynamicModels[provider]!;
+      } else if (provider === "ollama") {
+        list = ollamaModels;
+      } else {
+        list = MODEL_CATALOG[provider] || [];
+      }
+
+      // Filter by search term if provided
+      if (modelSearchTerm && modelSearchTerm.trim()) {
+        const term = modelSearchTerm.toLowerCase();
+        list = list.filter((m) => m.toLowerCase().includes(term));
+      }
+
+      // Include current model if not in list
+      if (current && current.trim() && !list.includes(current)) {
         return [current, ...list];
       }
+
       return list;
     },
-    [ollamaModels]
+    [ollamaModels, dynamicModels, modelSearchTerm]
   );
 
   const updateSetupProvider = useCallback(
     (provider: ModelId) => {
-      const list = provider === "ollama" ? ollamaModels : MODEL_CATALOG[provider];
+      // Fetch dynamic models for providers that support it
+      if (provider === "openrouter" && (!dynamicModels[provider] || (dynamicModels[provider]?.length ?? 0) === 0)) {
+        fetchDynamicModels(provider);
+      }
+
+      const list = (dynamicModels[provider]?.length ?? 0) > 0
+        ? dynamicModels[provider]!
+        : provider === "ollama"
+        ? ollamaModels
+        : MODEL_CATALOG[provider] || [];
+
       const defaultModel = list[0] || "";
       setSetup((prev) => ({
         ...prev,
@@ -1084,7 +1190,7 @@ export default function SearchPage() {
       setModelId(provider);
       setModelName(defaultModel);
     },
-    [ollamaModels]
+    [ollamaModels, dynamicModels, fetchDynamicModels]
   );
 
   const submitSetup = useCallback(async () => {
@@ -1498,14 +1604,43 @@ export default function SearchPage() {
                   </select>
                 </label>
 
-                <label className="block">
-                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">
-                    {setup.llm_provider === "ollama" ? "Model (from Ollama — updates automatically)" : "Model"}
-                  </span>
+                <div className="block">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                      {setup.llm_provider === "ollama"
+                        ? "Model (from Ollama — updates automatically)"
+                        : setup.llm_provider === "openrouter"
+                        ? `Model (${modelsForProvider(setup.llm_provider, setup.llm_model).length} available)`
+                        : "Model"}
+                    </span>
+                    {setup.llm_provider === "openrouter" && (
+                      <button
+                        onClick={() => fetchDynamicModels("openrouter")}
+                        disabled={fetchingModels["openrouter"]}
+                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-blue-400 hover:bg-blue-500/10 disabled:opacity-50"
+                        title="Refresh model list"
+                      >
+                        <RotateCcw className={`h-3 w-3 ${fetchingModels["openrouter"] ? "animate-spin" : ""}`} />
+                        {fetchingModels["openrouter"] ? "Loading..." : "Refresh"}
+                      </button>
+                    )}
+                  </div>
+
+                  {setup.llm_provider === "openrouter" && modelsForProvider(setup.llm_provider, setup.llm_model).length > 10 && (
+                    <input
+                      type="text"
+                      value={modelSearchTerm}
+                      onChange={(e) => setModelSearchTerm(e.target.value)}
+                      placeholder="Search models... (e.g., claude, gpt, llama)"
+                      className="mb-2 w-full rounded-lg border border-slate-600/60 bg-slate-900/60 px-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-500"
+                    />
+                  )}
+
                   <select
                     value={setup.llm_model}
                     onChange={(e) => setSetup((prev) => ({ ...prev, llm_model: e.target.value }))}
-                    className="w-full rounded-xl border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm text-slate-200"
+                    className="w-full rounded-xl border border-slate-600/60 bg-slate-900/60 px-3 py-2 text-sm text-slate-200 max-h-48 overflow-y-auto"
+                    size={setup.llm_provider === "openrouter" ? 8 : 1}
                   >
                     {modelsForProvider(setup.llm_provider, setup.llm_model).map((m) => (
                       <option key={m} value={m}>
@@ -1513,7 +1648,14 @@ export default function SearchPage() {
                       </option>
                     ))}
                   </select>
-                </label>
+
+                  {fetchingModels[setup.llm_provider] && (
+                    <p className="mt-1 text-xs text-blue-400">
+                      <Loader2 className="inline h-3 w-3 animate-spin mr-1" />
+                      Loading models from {MODEL_PROVIDER_META[setup.llm_provider].label}...
+                    </p>
+                  )}
+                </div>
 
                 <label className="block">
                   <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-slate-500">Custom model id (optional override)</span>
@@ -1676,37 +1818,12 @@ export default function SearchPage() {
 
         {/* Session Memory Panel */}
         {showSessions && sessions.length > 0 && (
-          <div className={`mb-8 rounded-2xl border p-4 ${isDark ? "border-slate-700/60 bg-slate-800/40" : "border-slate-200 bg-white/90"}`}>
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-400">
-                <History className="h-4 w-4" /> Research Sessions
-              </h3>
-              <button onClick={() => setShowSessions(false)} className="rounded-lg p-1 hover:bg-slate-700/30">
-                <X className="h-4 w-4 text-slate-500" />
-              </button>
-            </div>
-            <div className="space-y-2">
-              {sessions.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => loadSession(s)}
-                  className={`w-full rounded-xl px-4 py-3 text-left transition ${isDark ? "hover:bg-slate-700/50" : "hover:bg-slate-100"}`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-sm truncate max-w-[70%]">{s.query}</span>
-                    <span className="text-xs text-slate-500">{new Date(s.timestamp).toLocaleDateString()}</span>
-                  </div>
-                  {s.metadata?.self_reflection?.quality_score && (
-                    <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
-                      <span>Quality: {s.metadata.self_reflection.quality_score}/10</span>
-                      <span>·</span>
-                      <span>{s.metadata.sources?.length || 0} sources</span>
-                    </div>
-                  )}
-                </button>
-              ))}
-            </div>
-          </div>
+          <SessionsList
+            sessions={sessions}
+            onSelect={loadSession}
+            onClose={() => setShowSessions(false)}
+            isDark={isDark}
+          />
         )}
 
         {/* Search Bar */}
@@ -1775,25 +1892,14 @@ export default function SearchPage() {
           </div>
 
           {showHistory && history.length > 0 && (
-            <div
-              className="glass-card absolute left-0 right-0 top-full z-20 mt-2 border border-[var(--glass-border)] p-2 shadow-xl"
-              role="listbox"
-              aria-label="Search history"
-            >
-              <p className="mb-2 px-2 text-xs font-medium text-slate-500">Recent searches</p>
-              {history.map((h, i) => (
-                <button
-                  key={i}
-                  role="option"
-                  aria-selected={false}
-                  onClick={(e) => { e.stopPropagation(); setQuery(h); setShowHistory(false); }}
-                  onKeyDown={(e) => { if (e.key === "Enter") { setQuery(h); setShowHistory(false); } }}
-                  className="w-full rounded-lg px-4 py-2 text-left text-sm transition hover:bg-slate-200/50 dark:hover:bg-slate-700/50"
-                >
-                  {h}
-                </button>
-              ))}
-            </div>
+            <HistoryList
+              items={history}
+              onSelect={(item) => {
+                setQuery(item);
+                setShowHistory(false);
+              }}
+              isDark={isDark}
+            />
           )}
         </div>
 
@@ -1839,7 +1945,21 @@ export default function SearchPage() {
                 </select>
               </label>
               <label className="space-y-1">
-                <span className="text-[11px] font-medium text-slate-500">Model Name</span>
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-medium text-slate-500">
+                    Model Name {modelId === "openrouter" && `(${modelsForProvider(modelId, modelName).length})`}
+                  </span>
+                  {modelId === "openrouter" && (
+                    <button
+                      onClick={() => fetchDynamicModels("openrouter")}
+                      disabled={fetchingModels["openrouter"] || isResearching}
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-blue-400 hover:bg-blue-500/10 disabled:opacity-50"
+                      title="Refresh OpenRouter models"
+                    >
+                      <RotateCcw className={`h-2.5 w-2.5 ${fetchingModels["openrouter"] ? "animate-spin" : ""}`} />
+                    </button>
+                  )}
+                </div>
                 <select
                   value={modelName}
                   disabled={isResearching}
@@ -1960,26 +2080,7 @@ export default function SearchPage() {
 
         {/* Progress Log */}
         {isResearching && progressLog.length > 0 && !isDebateSwarm && (
-          <div className={`mb-12 rounded-2xl border p-6 ${isDark ? "border-slate-700/60 bg-slate-800/30" : "border-slate-200 bg-white/80"}`} role="log" aria-live="polite" aria-label="Research progress">
-            <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-slate-500">
-              <Loader2 className="h-4 w-4 animate-spin" /> Live Progress
-            </h2>
-            <ul className="space-y-3">
-              {progressLog.map((p, i) => (
-                <li key={i} className={`flex items-start gap-3 rounded-lg px-4 py-3 text-sm transition ${isDark ? "bg-slate-800/50" : "bg-slate-100/80"}`}>
-                  <span className="mt-0.5 h-2 w-2 shrink-0 animate-pulse rounded-full bg-emerald-500" />
-                  <div>
-                    <span className="text-slate-600 dark:text-slate-300">{p.detail}</span>
-                    {Array.isArray(p.data?.queries) && (
-                      <ul className="mt-2 list-inside list-disc text-slate-500">
-                        {(p.data.queries as string[]).map((q, j) => <li key={j}>{q}</li>)}
-                      </ul>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
+          <ProgressLog steps={progressLog} isDark={isDark} />
         )}
 
         {/* Error */}

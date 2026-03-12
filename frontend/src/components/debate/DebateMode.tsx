@@ -7,6 +7,8 @@ import DebateSettingsPanel from "./DebateSettingsPanel";
 import DebateChatTimeline from "./DebateChatTimeline";
 import DebateArtifactsPanel from "./DebateArtifactsPanel";
 import EvidenceCardsPanel from "./EvidenceCardsPanel";
+import DebateStatsPanel from "./DebateStatsPanel";
+import DebateHighlights from "./DebateHighlights";
 import {
   DebateMessage,
   DebateArtifacts,
@@ -38,6 +40,18 @@ export default function DebateMode({ topic, perspectiveDial, modelId, modelName,
   const [againstCards, setAgainstCards] = useState<EvidenceCard[]>([]);
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const chatTimelineRef = useRef<HTMLDivElement>(null);
+
+  const scrollToMessage = useCallback((messageId: string) => {
+    const element = document.getElementById(`msg-${messageId}`);
+    if (element) {
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+      element.classList.add("ring-2", "ring-violet-400");
+      setTimeout(() => {
+        element.classList.remove("ring-2", "ring-violet-400");
+      }, 2000);
+    }
+  }, []);
 
   const startDebate = useCallback(async (payload: {
     topic: string;
@@ -279,14 +293,35 @@ export default function DebateMode({ topic, perspectiveDial, modelId, modelName,
             <EvidenceCardsPanel forCards={forCards} againstCards={againstCards} isDark={isDark} />
           )}
 
-          {/* Chat */}
+          {/* Stats Dashboard */}
           {messages.length > 0 && (
-            <DebateChatTimeline
+            <DebateStatsPanel
               messages={messages}
-              personaA={personaA}
-              personaB={personaB}
+              forCards={forCards}
+              againstCards={againstCards}
               isDark={isDark}
             />
+          )}
+
+          {/* Key Highlights */}
+          {messages.length >= 4 && (
+            <DebateHighlights
+              messages={messages}
+              isDark={isDark}
+              onScrollToMessage={scrollToMessage}
+            />
+          )}
+
+          {/* Chat */}
+          {messages.length > 0 && (
+            <div ref={chatTimelineRef}>
+              <DebateChatTimeline
+                messages={messages}
+                personaA={personaA}
+                personaB={personaB}
+                isDark={isDark}
+              />
+            </div>
           )}
 
           {/* Artifact generation progress */}
@@ -306,7 +341,7 @@ export default function DebateMode({ topic, perspectiveDial, modelId, modelName,
               messages={messages}
               sessionId={sessionId}
               isDark={isDark}
-              onScrollToMessage={() => {}}
+              onScrollToMessage={scrollToMessage}
             />
           )}
 

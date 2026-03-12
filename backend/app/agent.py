@@ -75,6 +75,7 @@ MODEL_REGISTRY = {
         "api_key_env": "OPENAI_API_KEY",
         "base_url": None,
         "client_class": "ChatOpenAI",
+        "supports_list_models": True,
     },
     "anthropic": {
         "label": "Anthropic Claude",
@@ -82,6 +83,7 @@ MODEL_REGISTRY = {
         "api_key_env": "ANTHROPIC_API_KEY",
         "base_url": None,
         "client_class": "ChatAnthropic",
+        "supports_list_models": False,
     },
     "grok": {
         "label": "xAI Grok",
@@ -89,6 +91,7 @@ MODEL_REGISTRY = {
         "api_key_env": "GROK_API_KEY",
         "base_url": "https://api.x.ai/v1",
         "client_class": "ChatOpenAI",
+        "supports_list_models": False,
     },
     "mistral": {
         "label": "Mistral AI",
@@ -96,6 +99,7 @@ MODEL_REGISTRY = {
         "api_key_env": "MISTRAL_API_KEY",
         "base_url": "https://api.mistral.ai/v1",
         "client_class": "ChatOpenAI",
+        "supports_list_models": True,
     },
     "gemini": {
         "label": "Google Gemini",
@@ -103,6 +107,7 @@ MODEL_REGISTRY = {
         "api_key_env": "GEMINI_API_KEY",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
         "client_class": "ChatOpenAI",
+        "supports_list_models": True,
     },
     "deepseek": {
         "label": "DeepSeek",
@@ -110,6 +115,7 @@ MODEL_REGISTRY = {
         "api_key_env": "DEEPSEEK_API_KEY",
         "base_url": "https://api.deepseek.com/v1",
         "client_class": "ChatOpenAI",
+        "supports_list_models": True,
     },
     "qwen": {
         "label": "Qwen (DashScope)",
@@ -117,6 +123,7 @@ MODEL_REGISTRY = {
         "api_key_env": "QWEN_API_KEY",
         "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
         "client_class": "ChatOpenAI",
+        "supports_list_models": True,
     },
     "inception": {
         "label": "Inception Labs",
@@ -124,6 +131,15 @@ MODEL_REGISTRY = {
         "api_key_env": "INCEPTION_API_KEY",
         "base_url": "https://api.inceptionlabs.ai/v1",
         "client_class": "ChatOpenAI",
+        "supports_list_models": False,
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "model": os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet"),
+        "api_key_env": "OPENROUTER_API_KEY",
+        "base_url": "https://openrouter.ai/api/v1",
+        "client_class": "ChatOpenAI",
+        "supports_list_models": True,
     },
     "ollama": {
         "label": "Ollama Local",
@@ -131,6 +147,7 @@ MODEL_REGISTRY = {
         "api_key_env": None,
         "base_url": os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1"),
         "client_class": "ChatOpenAI",
+        "supports_list_models": True,
     },
 }
 
@@ -144,6 +161,98 @@ def clear_llm_cache() -> None:
 def clear_search_cache() -> None:
     """Clear the in-memory search result cache."""
     _search_cache.clear()
+
+
+def list_available_models(provider_id: str, api_key: str | None = None) -> list[dict]:
+    """
+    Fetch available models from a provider's API.
+    Returns a list of model dicts with 'id', 'name', 'context_length', and optional metadata.
+    Returns empty list if fetching fails.
+    """
+    cfg = MODEL_REGISTRY.get(provider_id)
+    if not cfg or not cfg.get("supports_list_models"):
+        return []
+
+    try:
+        key = api_key or os.getenv(cfg.get("api_key_env", ""), "")
+        # OpenRouter's /models endpoint is public - no key required
+        # Other providers may require keys
+        if not key and cfg.get("api_key_env") and provider_id != "openrouter":
+            # For non-public endpoints, key is required
+            return []
+
+        base_url = cfg.get("base_url")
+        headers = {}
+
+        if provider_id == "openai":
+            url = "https://api.openai.com/v1/models"
+            headers = {"Authorization": f"Bearer {key}"}
+        elif provider_id == "openrouter":
+            url = "https://openrouter.ai/api/v1/models"
+            # OpenRouter models endpoint is public, but include key if available
+            if key:
+                headers = {"Authorization": f"Bearer {key}"}
+        elif provider_id == "ollama":
+            base_url = base_url or "http://localhost:11434"
+            url = f"{base_url.rstrip('/v1').rstrip('/')}/api/tags"
+            # Ollama doesn't require auth
+        elif provider_id in ("mistral", "gemini", "deepseek", "qwen"):
+            if not base_url:
+                return []
+            url = f"{base_url.rstrip('/')}/models"
+            headers = {"Authorization": f"Bearer {key}"}
+        else:
+            return []
+
+        resp = httpx.get(url, headers=headers, timeout=15.0, verify=_ssl_verify)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Parse response based on provider
+        if provider_id == "ollama":
+            models = data.get("models", [])
+            return [
+                {
+                    "id": m.get("name", ""),
+                    "name": m.get("name", ""),
+                    "size": m.get("size", 0),
+                    "modified": m.get("modified_at", ""),
+                }
+                for m in models if m.get("name")
+            ]
+        elif provider_id == "openrouter":
+            models = data.get("data", [])
+            result = []
+            for m in models:
+                model_id = m.get("id", "")
+                if not model_id:
+                    continue
+                # Extract useful metadata from OpenRouter
+                result.append({
+                    "id": model_id,
+                    "name": m.get("name", model_id),
+                    "context_length": m.get("context_length", 0),
+                    "pricing": m.get("pricing", {}),
+                    "architecture": m.get("architecture", {}),
+                    "top_provider": m.get("top_provider", {}),
+                })
+            logger.info("Fetched %d models from OpenRouter", len(result))
+            return result
+        else:
+            # Standard OpenAI-compatible format
+            models = data.get("data", [])
+            return [
+                {
+                    "id": m.get("id", ""),
+                    "name": m.get("id", ""),
+                    "owned_by": m.get("owned_by", ""),
+                    "created": m.get("created", 0),
+                }
+                for m in models if m.get("id")
+            ]
+    except Exception as e:
+        logger.warning("Failed to list models for %s: %s", provider_id, e)
+        return []
 
 
 def _get_llm(model_id: str = "openai", model_name: str | None = None) -> BaseChatModel:
@@ -1403,14 +1512,15 @@ Write a CHRONOLOGICAL report organized by time periods. Structure:
 6. Cite each fact with [Source N] format"""
     if mode == "academic":
         return """
-Write a SCHOLARLY report with academic rigor. Structure:
-1. Begin with an Abstract/Summary paragraph
+Write a SCHOLARLY report that answers the question with academic rigor. Structure:
+1. Begin with an Abstract that directly addresses the research question/topic
 2. Use formal academic language and terminology
-3. Organize by themes with ## and ### headings
-4. Discuss methodology, findings, and limitations where applicable
-5. Note consensus vs. debate in the field
-6. Include a "Further Reading" subsection
-7. Cite each claim with [Source N] format"""
+3. Organize by themes and concepts with ## and ### headings
+4. Synthesize findings across sources - provide analysis, not just summaries
+5. Discuss methodology, findings, and limitations where applicable
+6. Note consensus vs. debate in the field
+7. Include a "Further Reading" subsection
+8. Cite each claim with [Source N] format"""
     if mode == "fact_check":
         return """
 Write a FACT-CHECK report. Structure:
@@ -1422,13 +1532,14 @@ Write a FACT-CHECK report. Structure:
 6. Cite each piece of evidence with [Source N] format"""
     if mode == "deep_dive":
         return """
-Write an EXHAUSTIVE deep-dive report. Structure:
-1. Comprehensive overview with ## main sections
+Write an EXHAUSTIVE deep-dive report that comprehensively answers the topic/question. Structure:
+1. Comprehensive overview with ## main sections organized by key themes
 2. Cover: Background, Current State, Key Players, Technical Details, Controversies, Impact, Future Outlook
-3. Include statistics, data points, and specific examples
-4. Address multiple perspectives and viewpoints
-5. Be thorough — aim for completeness over brevity
-6. Cite each claim with [Source N] format"""
+3. Synthesize insights across sources to provide deep analysis and understanding
+4. Include statistics, data points, and specific examples as evidence
+5. Address multiple perspectives and viewpoints
+6. Be thorough — aim for completeness over brevity
+7. Cite each claim with [Source N] format"""
     if mode == "social_media":
         return """
 Write a SOCIAL MEDIA research report. Structure:
@@ -1439,11 +1550,12 @@ Write a SOCIAL MEDIA research report. Structure:
 5. Add a "Signal vs Noise" subsection to summarize reliability
 6. Cite each claim with [Source N] format"""
     return """
-1. Write a clear, informative report with sections (use ## for main sections, ### for subsections)
-2. Include relevant facts, statistics, and insights from the sources
-3. Cite each claim using [Source N] format (e.g., [Source 1], [Source 3])
-4. Add a "References" section at the end listing all sources with titles and URLs
-5. Be objective and thorough. Use bullet points for lists."""
+1. Write a clear, informative ANSWER that directly addresses the user's question/topic
+2. Structure with logical sections based on themes/concepts (use ## for main sections, ### for subsections)
+3. Provide insights, analysis, and implications - go beyond just repeating source content
+4. Include relevant facts, statistics, and evidence to support your answer
+5. Cite each claim using [Source N] format (e.g., [Source 1], [Source 3])
+6. Be objective, thorough, and synthesize across sources. Use bullet points for lists."""
 
 
 def _merge_mode_configs(modes: list[str]) -> dict:
@@ -1769,11 +1881,19 @@ async def run_research_agent(
                     "5. Personalize the report by acknowledging the user's research journey\n"
                 )
 
-            synthesis_prompt = f"""You are a research analyst. Synthesize the following sources into a comprehensive, well-structured Markdown report.
-{memory_context}
-User's topic: {query}
+            synthesis_prompt = f"""You are a research analyst. Your task is to ANSWER the user's question comprehensively using the provided sources as supporting evidence.
 
-Sources:
+CRITICAL: Do NOT simply summarize what each source says. Instead:
+1. Directly ANSWER the user's question/topic with a clear, informative response
+2. Use the sources as EVIDENCE to support your answer (cite with [Source N])
+3. Synthesize insights ACROSS sources to provide a coherent, unified answer
+4. Go beyond surface-level summaries - provide analysis, context, and implications
+5. Structure your answer logically by themes/concepts, NOT by source
+
+{memory_context}
+User's question/topic: {query}
+
+Sources (use these as evidence, DO NOT just summarize them):
 {sources_text}
 
 Instructions:{mode_instructions}{safe_instruction}"""
@@ -1783,7 +1903,7 @@ Instructions:{mode_instructions}{safe_instruction}"""
             report_content = (report_resp.content or "").strip()
             budget.track("synthesis", synthesis_prompt, report_content)
 
-        refs = "\n".join(f"- **[{i+1}]** [{s['title']}]({s['url']})" for i, s in enumerate(scraped))
+        refs = "\n".join(f"{i+1}. [{s['title']}]({s['url']})" for i, s in enumerate(scraped))
         report_content += f"\n\n## References\n\n{refs}"
 
         # Step 5: Extract metadata

@@ -4,6 +4,7 @@ Streams research progress via Server-Sent Events (SSE).
 Includes rate limiting, input validation, security headers, and error sanitization.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -41,12 +42,14 @@ def _resolve_env_path() -> pathlib.Path:
 _ENV_PATH = _resolve_env_path()
 load_dotenv(dotenv_path=_ENV_PATH)
 
-from app.agent import run_research_agent, clear_llm_cache, clear_search_cache, _get_llm, MODEL_REGISTRY
+from app.agent import run_research_agent, clear_llm_cache, clear_search_cache, _get_llm, MODEL_REGISTRY, list_available_models
 from app.memory_graph import recall_past_context, get_memory_graph, GRAPH_EDGE_THRESHOLD
 from app.db import init_db, new_session_id, create_session, get_session, update_session_status
 from app.debate_engine import DebateOrchestrator
 from app.schemas.evidence import EvidenceCardList, EvidenceConfig
 from app.evidence.web_evidence_worker import collect_web_evidence
+from app.auth_db import init_auth_db
+from app.auth_routes import router as auth_router
 from app.browsing.session_manager import BrowserSessionManager
 from app.kb_models import (
     init_kb_db, create_kb, list_kbs, get_kb, delete_kb,
@@ -155,6 +158,9 @@ app = FastAPI(
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+# Include authentication router
+app.include_router(auth_router)
+
 _frontend_port = os.getenv("FRONTEND_PORT", "3000")
 _cors_origins = [
     "http://localhost:3000",
@@ -191,8 +197,9 @@ VALID_MODES = {
     "social_media",
     "rag",
 }
-VALID_MODELS = {"openai", "anthropic", "grok", "mistral", "gemini", "deepseek", "qwen", "ollama", "inception"}
+VALID_MODELS = {"openai", "anthropic", "grok", "mistral", "gemini", "deepseek", "qwen", "ollama", "inception", "openrouter"}
 VALID_SEARCH_PROVIDERS = {"serpapi", "tavily", "searxng"}
+VALID_EMBEDDING_PROVIDERS = {"openai", "openrouter", "ollama", "hash", "auto"}
 TRUST_PROXY_HEADERS = os.getenv("TRUST_PROXY_HEADERS", "false").lower() in {"1", "true", "yes"}
 _TRUSTED_PROXY_IPS = {
     ip.strip()
@@ -263,12 +270,22 @@ class SetupRequest(BaseModel):
     ollama_base_url: str | None = None
     search_provider: str
     search_api_key: str
+    embedding_provider: str | None = None
+    embedding_model: str | None = None
+    embedding_api_key: str | None = None
 
     @field_validator("llm_provider")
     @classmethod
     def validate_llm_provider(cls, v: str) -> str:
         if v not in VALID_MODELS:
             raise ValueError(f"Invalid llm_provider. Must be one of: {', '.join(VALID_MODELS)}")
+        return v
+
+    @field_validator("embedding_provider")
+    @classmethod
+    def validate_embedding_provider(cls, v: str | None) -> str | None:
+        if v and v not in VALID_EMBEDDING_PROVIDERS:
+            raise ValueError(f"Invalid embedding_provider. Must be one of: {', '.join(VALID_EMBEDDING_PROVIDERS)}")
         return v
 
     @field_validator("llm_model")
@@ -516,6 +533,19 @@ async def list_ollama_models():
     return {"models": names}
 
 
+@app.get("/api/models/{provider_id}")
+async def list_provider_models(provider_id: str, api_key: Optional[str] = None):
+    """
+    Dynamically fetch available models from a provider's API.
+    Query parameter 'api_key' is optional - uses env var if not provided.
+    """
+    if provider_id not in MODEL_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+
+    models = await asyncio.to_thread(list_available_models, provider_id, api_key)
+    return {"provider": provider_id, "models": models}
+
+
 @app.post("/api/providers/inception/test")
 async def test_inception_provider():
     api_key = os.getenv("INCEPTION_API_KEY")
@@ -566,14 +596,15 @@ async def setup_runtime_config(body: SetupRequest):
         pass
 
     _PROVIDER_ENV_MAP = {
-        "openai":    {"model_env": "OPENAI_MODEL",    "key_env": "OPENAI_API_KEY"},
-        "anthropic": {"model_env": "ANTHROPIC_MODEL",  "key_env": "ANTHROPIC_API_KEY"},
-        "grok":      {"model_env": "GROK_MODEL",       "key_env": "GROK_API_KEY"},
-        "mistral":   {"model_env": "MISTRAL_MODEL",    "key_env": "MISTRAL_API_KEY"},
-        "gemini":    {"model_env": "GEMINI_MODEL",     "key_env": "GEMINI_API_KEY"},
-        "deepseek":  {"model_env": "DEEPSEEK_MODEL",   "key_env": "DEEPSEEK_API_KEY"},
-        "qwen":      {"model_env": "QWEN_MODEL",       "key_env": "QWEN_API_KEY"},
-        "inception": {"model_env": "INCEPTION_MODEL",  "key_env": "INCEPTION_API_KEY"},
+        "openai":     {"model_env": "OPENAI_MODEL",     "key_env": "OPENAI_API_KEY"},
+        "anthropic":  {"model_env": "ANTHROPIC_MODEL",  "key_env": "ANTHROPIC_API_KEY"},
+        "grok":       {"model_env": "GROK_MODEL",       "key_env": "GROK_API_KEY"},
+        "mistral":    {"model_env": "MISTRAL_MODEL",    "key_env": "MISTRAL_API_KEY"},
+        "gemini":     {"model_env": "GEMINI_MODEL",     "key_env": "GEMINI_API_KEY"},
+        "deepseek":   {"model_env": "DEEPSEEK_MODEL",   "key_env": "DEEPSEEK_API_KEY"},
+        "qwen":       {"model_env": "QWEN_MODEL",       "key_env": "QWEN_API_KEY"},
+        "inception":  {"model_env": "INCEPTION_MODEL",  "key_env": "INCEPTION_API_KEY"},
+        "openrouter": {"model_env": "OPENROUTER_MODEL", "key_env": "OPENROUTER_API_KEY"},
     }
 
     if body.llm_provider == "ollama":
@@ -587,6 +618,19 @@ async def setup_runtime_config(body: SetupRequest):
         env_updates[mapping["key_env"]] = body.llm_api_key
     else:
         raise HTTPException(status_code=400, detail=f"Unknown provider: {body.llm_provider}")
+
+    # Configure embedding provider if specified
+    if body.embedding_provider and body.embedding_provider not in ("auto", "hash"):
+        env_updates["EMBEDDING_PROVIDER"] = body.embedding_provider
+        if body.embedding_model:
+            env_updates["EMBEDDING_MODEL"] = body.embedding_model
+        if body.embedding_api_key:
+            if body.embedding_provider == "openai":
+                # Use same key as LLM if not specified separately
+                if not env_updates.get("OPENAI_API_KEY"):
+                    env_updates["OPENAI_API_KEY"] = body.embedding_api_key
+            elif body.embedding_provider == "openrouter":
+                env_updates["OPENROUTER_EMBEDDING_KEY"] = body.embedding_api_key
 
     persisted = True
     try:
@@ -917,6 +961,11 @@ async def _startup():
         logger.info("Debate DB initialized")
     except Exception as e:
         logger.warning("Debate DB init failed (debate features unavailable): %s", e)
+    try:
+        init_auth_db()
+        logger.info("Auth DB initialized")
+    except Exception as e:
+        logger.warning("Auth DB init failed: %s", e)
     try:
         init_kb_db()
         logger.info("Knowledge Base DB initialized")

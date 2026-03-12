@@ -1,16 +1,24 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Sun, Moon, Command } from "lucide-react";
+import { Sun, Moon, Command, User, LogOut } from "lucide-react";
 import { Toaster } from "sonner";
 import { useTheme } from "@/context/ThemeContext";
+import { useAuth } from "@/context/AuthContext";
+import { usePathname } from "next/navigation";
 import AppTabs from "./AppTabs";
 import CommandPalette from "@/components/CommandPalette";
 
 export default function SharedHeader() {
   const { theme, isDark, toggleTheme } = useTheme();
+  const { user, isAuthenticated, logout } = useAuth();
+  const pathname = usePathname();
   const [logoError, setLogoError] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+
+  // Hide header on login/register pages
+  const hideHeader = pathname === "/login" || pathname === "/register";
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -22,6 +30,14 @@ export default function SharedHeader() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  if (hideHeader) {
+    return (
+      <>
+        <Toaster theme={theme} position="top-right" richColors closeButton />
+      </>
+    );
+  }
 
   return (
     <>
@@ -75,6 +91,45 @@ export default function SharedHeader() {
                 <Moon className="h-5 w-5 text-indigo-600" />
               )}
             </button>
+            {isAuthenticated && user && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setShowUserMenu(!showUserMenu)}
+                  className="btn-polish flex items-center gap-2 rounded-xl px-3 py-2 transition hover:bg-slate-200/50 dark:hover:bg-slate-800/50"
+                  aria-label="User menu"
+                >
+                  <User className="h-4 w-4" />
+                  <span className="hidden sm:inline text-sm">{user.username}</span>
+                </button>
+                {showUserMenu && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setShowUserMenu(false)}
+                    />
+                    <div className="absolute right-0 mt-2 w-56 glass rounded-xl shadow-lg border border-[var(--glass-border)] z-50">
+                      <div className="p-3 border-b border-[var(--glass-border)]">
+                        <p className="text-sm font-medium">{user.username}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{user.email}</p>
+                      </div>
+                      <div className="p-2">
+                        <button
+                          onClick={() => {
+                            setShowUserMenu(false);
+                            logout();
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg transition"
+                        >
+                          <LogOut className="h-4 w-4" />
+                          <span>Logout</span>
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </header>

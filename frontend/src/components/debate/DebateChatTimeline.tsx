@@ -3,7 +3,10 @@
 import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import rehypeSanitize from "rehype-sanitize";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import "katex/dist/katex.min.css";
 import { DebateMessage, PersonaConfig } from "./types";
 
 type Props = {
@@ -12,6 +15,47 @@ type Props = {
   personaB: PersonaConfig;
   isDark: boolean;
   onScrollToMessage?: (messageId: string) => void;
+};
+
+// Allow KaTeX elements in sanitization
+const sanitizeSchema = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    div: [...(defaultSchema.attributes?.div ?? []), ["className", /^(math|katex)/]],
+    span: [
+      ...(defaultSchema.attributes?.span ?? []),
+      ["className", /^(katex|mord|mbin|mrel|mopen|mclose|mpunct|minner|mop|mfrac|msqrt|mspace|msupsub|vlist|strut|base)/],
+      "style",
+      "aria-hidden",
+    ],
+    math: [["xmlns"]],
+    semantics: [],
+    annotation: [["encoding"]],
+  },
+  tagNames: [
+    ...(defaultSchema.tagNames ?? []),
+    "math",
+    "semantics",
+    "annotation",
+    "mrow",
+    "mi",
+    "mo",
+    "mn",
+    "msup",
+    "msub",
+    "mfrac",
+    "msqrt",
+    "mroot",
+    "mover",
+    "munder",
+    "munderover",
+    "mtable",
+    "mtr",
+    "mtd",
+    "mtext",
+    "mspace",
+  ],
 };
 
 export default function DebateChatTimeline({ messages, personaA, personaB, isDark, onScrollToMessage }: Props) {
@@ -56,6 +100,7 @@ export default function DebateChatTimeline({ messages, personaA, personaB, isDar
           return (
             <div
               key={msg.messageId}
+              id={`msg-${msg.messageId}`}
               ref={(el) => { messageRefs.current[msg.messageId] = el; }}
               className={`rounded-xl border p-4 transition-all ${accentBg} ${alignment}`}
             >
@@ -63,7 +108,7 @@ export default function DebateChatTimeline({ messages, personaA, personaB, isDar
               {msg.replyToMessageId && (
                 <button
                   onClick={() => scrollTo(msg.replyToMessageId!)}
-                  className="mb-2 flex items-center gap-1 text-[10px] text-slate-500 hover:text-slate-300"
+                  className="mb-3 flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-300"
                 >
                   <span className="font-medium">↩ Replying to {msg.replyToMessageId}:</span>
                   <span className="truncate max-w-[200px]">
@@ -73,36 +118,39 @@ export default function DebateChatTimeline({ messages, personaA, personaB, isDar
               )}
 
               {/* Header */}
-              <div className="mb-2 flex items-center gap-2">
-                <div className={`flex h-7 w-7 items-center justify-center rounded-full text-[10px] font-bold text-white ${accentAvatar}`}>
+              <div className="mb-3 flex items-center gap-2.5">
+                <div className={`flex h-9 w-9 items-center justify-center rounded-full text-sm font-bold text-white ${accentAvatar}`}>
                   {msg.agentId}
                 </div>
-                <div className="flex flex-1 items-center gap-2">
-                  <span className="text-xs font-semibold">
+                <div className="flex flex-1 items-center gap-2.5">
+                  <span className="text-sm font-semibold">
                     Agent {msg.agentId}
                   </span>
-                  <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${isA ? "bg-emerald-500/15 text-emerald-400" : "bg-rose-500/15 text-rose-400"}`}>
+                  <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${isA ? "bg-emerald-500/15 text-emerald-400" : "bg-rose-500/15 text-rose-400"}`}>
                     {messages.length > 0 && (isA ? "FOR" : "AGAINST")}
                   </span>
-                  <span className="text-[10px] text-slate-500">
+                  <span className="text-xs text-slate-400">
                     {persona.profession}
                   </span>
                   {phaseLabel && (
-                    <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-bold ${phasePillColor}`}>
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${phasePillColor}`}>
                       {phaseLabel}
                     </span>
                   )}
                 </div>
-                <span className="text-[9px] tabular-nums text-slate-500">{msg.messageId}</span>
+                <span className="text-xs tabular-nums text-slate-500">{msg.messageId}</span>
               </div>
 
               {/* Message text — markdown when final, plain when streaming for readable output */}
-              <div className={`debate-message-body text-sm leading-relaxed max-w-full overflow-hidden ${isDark ? "text-slate-200" : "text-slate-700"}`}>
+              <div className={`debate-message-body text-base leading-relaxed max-w-full overflow-hidden ${isDark ? "text-slate-200" : "text-slate-700"}`}>
                 {msg.isStreaming ? (
                   <span className="whitespace-pre-wrap">{msg.text}</span>
                 ) : (
-                  <div className={`prose prose-sm max-w-none prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-headings:my-2 prose-p:leading-snug ${isDark ? "prose-invert" : ""}`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+                  <div className={`prose prose-base max-w-none prose-p:my-3 prose-ul:my-3 prose-ol:my-3 prose-li:my-1.5 prose-headings:my-4 prose-p:leading-relaxed prose-code:text-emerald-400 prose-code:bg-slate-800/60 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-pre:bg-slate-900/80 prose-pre:border prose-pre:border-slate-700/50 ${isDark ? "prose-invert" : ""}`}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[[rehypeSanitize, sanitizeSchema], rehypeKatex]}
+                    >
                       {msg.text || ""}
                     </ReactMarkdown>
                   </div>

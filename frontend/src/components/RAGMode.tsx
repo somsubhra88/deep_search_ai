@@ -26,8 +26,10 @@ import {
   ExternalLink,
   Hash,
   Lightbulb,
+  Download,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -422,6 +424,17 @@ export default function RAGMode({
     setTimeout(() => setAnswerCopied(false), 2000);
   }, [ragResult]);
 
+  const downloadAnswer = useCallback(() => {
+    if (!ragResult) return;
+    const blob = new Blob([ragResult.answer_markdown], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `rag-answer-${Date.now()}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [ragResult]);
+
   // ---------------------------------------------------------------------------
   // Render helpers
   // ---------------------------------------------------------------------------
@@ -769,6 +782,13 @@ export default function RAGMode({
                     >
                       {answerCopied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
                     </button>
+                    <button
+                      onClick={downloadAnswer}
+                      className={`rounded-lg p-1.5 transition ${isDark ? "text-slate-500 hover:bg-slate-700/60 hover:text-slate-300" : "text-slate-400 hover:bg-slate-100 hover:text-slate-600"}`}
+                      title="Download as Markdown"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                 </div>
 
@@ -794,7 +814,7 @@ export default function RAGMode({
                 <div className="px-6 py-6">
                   <article className={`rag-answer prose max-w-none ${isDark ? "prose-invert" : "prose-slate"}`}>
                     <ReactMarkdown
-                      remarkPlugins={[remarkMath]}
+                      remarkPlugins={[remarkGfm, remarkMath]}
                       rehypePlugins={[rehypeKatex]}
                       components={{
                         a: ({ href, children }) => {
@@ -866,6 +886,29 @@ export default function RAGMode({
                           <blockquote className={`my-4 rounded-r-xl border-l-4 py-3 pl-4 pr-4 ${isDark ? "border-emerald-500/40 bg-emerald-500/5 text-slate-400" : "border-emerald-400/50 bg-emerald-50/60 text-slate-500"}`}>
                             {children}
                           </blockquote>
+                        ),
+                        table: ({ children }) => (
+                          <div className={`my-5 overflow-x-auto rounded-xl border ${isDark ? "border-slate-700/40" : "border-slate-200"}`}>
+                            <table className="min-w-full text-sm">{children}</table>
+                          </div>
+                        ),
+                        thead: ({ children }) => (
+                          <thead className={isDark ? "bg-slate-800/60 text-slate-200" : "bg-slate-100 text-slate-800"}>
+                            {children}
+                          </thead>
+                        ),
+                        th: ({ children }) => (
+                          <th className={`px-4 py-3 text-left font-semibold ${isDark ? "border-slate-700/40" : "border-slate-200"}`}>
+                            {children}
+                          </th>
+                        ),
+                        td: ({ children }) => (
+                          <td className={`border-t px-4 py-3 ${isDark ? "border-slate-700/40 text-slate-300" : "border-slate-200 text-slate-600"}`}>
+                            {children}
+                          </td>
+                        ),
+                        hr: () => (
+                          <hr className={`my-6 ${isDark ? "border-slate-700/40" : "border-slate-200"}`} />
                         ),
                       }}
                     >

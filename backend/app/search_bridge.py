@@ -60,8 +60,13 @@ def get_search_run(search_id: str) -> dict[str, Any] | None:
     return _search_runs.get(search_id)
 
 
+_ALLOWED_PERSONAS_CACHE: list[str] | None = None
+
 def _allowed_persona_ids() -> list[str]:
-    return [p["persona_id"] for p in get_personas_config()]
+    global _ALLOWED_PERSONAS_CACHE
+    if _ALLOWED_PERSONAS_CACHE is None:
+        _ALLOWED_PERSONAS_CACHE = [p["persona_id"] for p in get_personas_config()]
+    return _ALLOWED_PERSONAS_CACHE
 
 
 async def generate_action_suggestions(
@@ -84,13 +89,12 @@ async def generate_action_suggestions(
     citations = record.get("citations", [])
     allowed_personas = _allowed_persona_ids()
 
-    citations_text = ""
-    if citations:
-        for i, c in enumerate(citations[:8]):
-            title = c.get("title") or c.get("url", "")[:60]
-            citations_text += f"  [{i + 1}] {title}\n"
-    if not citations_text:
-        citations_text = "  (none)\n"
+    citations_text = (
+        "\n".join(
+            f"  [{i + 1}] {c.get('title') or c.get('url', '')[:60]}"
+            for i, c in enumerate(citations[:8])
+        ) if citations else "  (none)"
+    ) + "\n"
 
     prompt = f"""You are an assistant that suggests follow-up actions after a user has run a research search.
 Your task: given the research context below, suggest 4 to 8 actionable next steps that the user can take in the Assistant (e.g. summarise in email, add to calendar, save as note, dig deeper with another persona).
@@ -127,27 +131,23 @@ Return ONLY a JSON array of objects, each with keys: action_id, label, icon_key,
         for i, item in enumerate(raw[:8]):
             if not isinstance(item, dict):
                 continue
-            action_id = str(item.get("action_id") or f"action_{i}").replace(" ", "_")[:64]
-            label = str(item.get("label") or "Action")[:40]
+
             icon_key = str(item.get("icon_key") or "zap").lower()
-            if icon_key not in VALID_ICON_KEYS:
-                icon_key = "zap"
-            short_description = str(item.get("short_description") or "")[:200]
             risk_hint = str(item.get("risk_hint") or "low").lower()
-            if risk_hint not in VALID_RISK_HINTS:
-                risk_hint = "low"
             suggested_persona_id = str(item.get("suggested_persona_id") or "")
-            if suggested_persona_id not in allowed_personas:
-                suggested_persona_id = allowed_personas[0] if allowed_personas else ""
-            prefill_prompt = str(item.get("prefill_prompt") or label)[:500]
+            label = str(item.get("label") or "Action")[:40]
+
             out.append({
-                "action_id": action_id,
+                "action_id": str(item.get("action_id") or f"action_{i}").replace(" ", "_")[:64],
                 "label": label,
-                "icon_key": icon_key,
-                "short_description": short_description,
-                "risk_hint": risk_hint,
-                "suggested_persona_id": suggested_persona_id,
-                "prefill_prompt": prefill_prompt,
+                "icon_key": icon_key if icon_key in VALID_ICON_KEYS else "zap",
+                "short_description": str(item.get("short_description") or "")[:200],
+                "risk_hint": risk_hint if risk_hint in VALID_RISK_HINTS else "low",
+                "suggested_persona_id": (
+                    suggested_persona_id if suggested_persona_id in allowed_personas
+                    else (allowed_personas[0] if allowed_personas else "")
+                ),
+                "prefill_prompt": str(item.get("prefill_prompt") or label)[:500],
             })
         return out
     except Exception as e:

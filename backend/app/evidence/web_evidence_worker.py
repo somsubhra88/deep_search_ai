@@ -119,18 +119,17 @@ async def collect_web_evidence(
     reranker = BM25Reranker() if config.use_reranking else None
     sem = asyncio.Semaphore(_URL_CONCURRENCY)
 
-    if progress_callback:
-        await progress_callback("evidence.started", {
-            "query": query, "url_count": len(deduped_urls),
-        })
+    async def _emit_progress(event: str, data: dict) -> None:
+        if progress_callback:
+            await progress_callback(event, data)
+
+    await _emit_progress("evidence.started", {"query": query, "url_count": len(deduped_urls)})
 
     all_cards: list[EvidenceCard] = []
 
     async def _bounded_process(url: str) -> list[EvidenceCard]:
         async with sem:
-            if progress_callback:
-                await progress_callback("url.started", {"url": url})
-
+            await _emit_progress("url.started", {"url": url})
             cards = await _process_single_url(
                 url=url,
                 query=query,
@@ -140,11 +139,7 @@ async def collect_web_evidence(
                 ephemeral_store=ephemeral_store,
                 reranker=reranker,
             )
-
-            if progress_callback:
-                await progress_callback("url.cards", {
-                    "url": url, "card_count": len(cards),
-                })
+            await _emit_progress("url.cards", {"url": url, "card_count": len(cards)})
             return cards
 
     tasks = [_bounded_process(u) for u in deduped_urls]
@@ -172,11 +167,10 @@ async def collect_web_evidence(
         total_urls_processed=len(deduped_urls),
     )
 
-    if progress_callback:
-        await progress_callback("evidence.finished", {
-            "total_cards": len(all_cards),
-            "total_urls": len(deduped_urls),
-        })
+    await _emit_progress("evidence.finished", {
+        "total_cards": len(all_cards),
+        "total_urls": len(deduped_urls),
+    })
 
     return card_list
 
@@ -186,15 +180,12 @@ def _deduplicate_by_domain(urls: list[str], max_urls: int) -> list[str]:
     seen_domains: set[str] = set()
     result: list[str] = []
     for url in urls:
-        try:
-            domain = urlparse(url).netloc.lower().replace("www.", "")
-            if domain and domain not in seen_domains:
-                seen_domains.add(domain)
-                result.append(url)
-                if len(result) >= max_urls:
-                    break
-        except Exception:
-            continue
+        domain = urlparse(url).netloc.lower().replace("www.", "")
+        if domain and domain not in seen_domains:
+            seen_domains.add(domain)
+            result.append(url)
+            if len(result) >= max_urls:
+                break
     return result
 
 
@@ -206,10 +197,8 @@ async def collect_evidence_for_debate(
     ephemeral_store: Optional[InMemoryVectorStore] = None,
     config: Optional[EvidenceConfig] = None,
 ) -> list[EvidenceCard]:
-    """
-    Convenience wrapper for debate mode — returns flat card list.
-    """
-    card_list = await collect_web_evidence(
+    """Convenience wrapper for debate mode — returns flat card list."""
+    result = await collect_web_evidence(
         query=query,
         urls=urls,
         llm=llm,
@@ -217,4 +206,4 @@ async def collect_evidence_for_debate(
         config=config,
         ephemeral_store=ephemeral_store,
     )
-    return card_list.cards
+    return result.cards
